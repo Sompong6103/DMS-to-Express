@@ -45,15 +45,20 @@ def db_ok(path):
     return bool(path) and all(os.path.exists(os.path.join(path, n + ".DBF")) for n in REQUIRED)
 
 def xls_jobs(path):
-    try: return len(EX.read_xls_jobs(path))
+    try: return EX.count_items(path)
     except Exception: return -1
+
+def xls_mode(path):
+    try: return EX.detect_mode(path)
+    except Exception: return ""
 
 def config_status():
     ok = bool(XLS_FILE) and os.path.isfile(XLS_FILE) and XLS_FILE.lower().endswith(".xls")
     return {"db_dir": EX.DB_DIR, "db_ok": db_ok(EX.DB_DIR),
             "db_missing": [n for n in REQUIRED if not os.path.exists(os.path.join(EX.DB_DIR or "", n + ".DBF"))],
             "xls_file": XLS_FILE, "xls_name": os.path.basename(XLS_FILE) if XLS_FILE else "",
-            "xls_ok": ok, "xls_jobs": xls_jobs(XLS_FILE) if ok else -1}
+            "xls_ok": ok, "xls_jobs": xls_jobs(XLS_FILE) if ok else -1,
+            "mode": xls_mode(XLS_FILE) if ok else ""}
 
 # ───────── folder/file browser ─────────
 def listdir(path, want_files=False):
@@ -100,8 +105,7 @@ def capture(fn, *a, **k):
     return clean(buf.getvalue())
 
 def preview_data(xls):
-    jobs  = EX.read_xls_jobs(xls)
-    bills = EX.group_bills(jobs)
+    mode, bills = EX.load_source(xls)
     t     = EX.open_tables()
     plan  = EX.next_numbers(t["ARTRN"], bills)
     out   = []
@@ -111,8 +115,12 @@ def preview_data(xls):
                     "lines": [{"stk": l["stk"], "des": l["des"], "amt": l["amt"]} for l in b["lines"]],
                     "sub": b["sub"], "vat": b["vat"], "total": b["total"]})
     new = sum(1 for x in out if not x["skipped"])
-    return {"file": os.path.basename(xls), "njobs": len(jobs),
+    return {"file": os.path.basename(xls), "mode": mode, "njobs": sum(b["njobs"] for b in bills),
             "nbills": len(bills), "nnew": new, "bills": out}
+
+def verify_text(xls):
+    fn = EX.cmd_verify_parts if EX.detect_mode(xls)=="parts" else EX.cmd_verify
+    return capture(fn, _args(xls))
 
 # ───────── HTML ─────────
 HTML = r"""<!doctype html><html lang="th"><head><meta charset="utf-8">
@@ -133,6 +141,9 @@ button.sm{padding:9px 13px;font-size:13px} button:hover{filter:brightness(1.08)}
 .b-prev{background:var(--ac)} .b-ver{background:#a78bfa} .b-com{background:var(--ok)} .b-pick{background:#cbd5e1}
 .badge{font-size:12px;padding:3px 10px;border-radius:20px;white-space:nowrap}
 .badge.ok{background:#064e3b;color:#6ee7b7} .badge.bad{background:#450a0a;color:#fca5a5}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{flex:1;text-align:center;padding:13px;border-radius:11px;background:#0b1220;border:1px solid #334155;color:var(--mut);cursor:pointer;font-weight:600;font-size:14px}
+.tab.on{background:var(--ac);color:#04111f;border-color:var(--ac)}
 .bill{border:1px solid #334155;border-radius:11px;padding:14px;margin:12px 0;background:#0b1220}
 .bill.skip{opacity:.55} .bill h3{margin:0 0 8px;font-size:16px;color:var(--ac)} .bill.skip h3{color:var(--mut)}
 table{width:100%;border-collapse:collapse;font-size:13px} td{padding:5px 6px;border-bottom:1px solid #1e293b}
@@ -157,7 +168,12 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
 .dim{color:var(--mut);font-size:12px}
 </style></head><body>
 <h1>🧾 นำเข้าข้อมูลศูนย์บริการ → โปรแกรมบัญชี Express</h1>
-<div class="sub">รวมงานบริการตามวันที่ → สร้างบิลขายเงินสด-ศูนย์บริการ (HC ปีเดือน/เลขรัน)</div>
+<div class="sub">รวมรายการตามวันที่ → สร้างบิลขายเงินสด (โปรแกรมจะเลือกชนิดบิลให้อัตโนมัติจากหัวคอลัมน์ของไฟล์)</div>
+
+<div class="tabs">
+  <div class="tab" id="tab-service">🔧 ขายเงินสด-ศูนย์บริการ (HC)</div>
+  <div class="tab" id="tab-parts">🔩 ขายเงินสด-อะไหล่ (HO)</div>
+</div>
 
 <div class="card">
   <div class="frow">
@@ -208,6 +224,11 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
 <script>
 const $=s=>document.querySelector(s);
 let selXls='';
+const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'}};
+function setMode(m){
+  $('#tab-service').classList.toggle('on',m==='service');
+  $('#tab-parts').classList.toggle('on',m==='parts');
+}
 function fmt(n){return n.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}
 function busy(b,msg){$('#status').innerHTML=b?'<span class="spin"></span> '+msg:(msg||'');
   document.querySelectorAll('.card button').forEach(x=>x.disabled=b);}
@@ -217,13 +238,16 @@ async function loadConfig(){
   $('#db').value=c.db_dir||''; $('#xlsfile').value=c.xls_file||''; selXls=c.xls_file||'';
   const db=$('#dbbadge'); db.className='badge '+(c.db_ok?'ok':'bad');
   db.textContent=c.db_ok?'✓ พบฐานข้อมูล':'✗ ไม่พบ DBF'+(c.db_missing&&c.db_missing.length?' ('+c.db_missing.slice(0,3).join(',')+'…)':'');
-  const xb=$('#xlsbadge');
+  const xb=$('#xlsbadge'); const u=MODES[c.mode]?MODES[c.mode].unit:'รายการ';
   if(!c.xls_file){xb.className='badge bad';xb.textContent='✗ ยังไม่ได้เลือกไฟล์';}
   else{xb.className='badge '+(c.xls_ok?'ok':'bad');
-    xb.textContent=c.xls_ok?('✓ '+(c.xls_jobs>=0?c.xls_jobs+' งาน':'พร้อม')):'✗ ไฟล์ไม่ถูกต้อง';}
+    xb.textContent=c.xls_ok?('✓ '+(c.xls_jobs>=0?c.xls_jobs+' '+u:'พร้อม')+(c.mode?' · '+MODES[c.mode].name:'')):'✗ ไฟล์ไม่ถูกต้อง';}
+  setMode(c.mode);
 }
 function renderPreview(d){
-  let h=`<div class="sub">ไฟล์ <b>${d.file}</b> — ${d.njobs} งาน → ${d.nbills} บิล · จะสร้างใหม่ <b style="color:var(--ok)">${d.nnew}</b> บิล</div>`;
+  setMode(d.mode); const u=MODES[d.mode]?MODES[d.mode].unit:'รายการ';
+  const mn=MODES[d.mode]?MODES[d.mode].name:'';
+  let h=`<div class="sub">ไฟล์ <b>${d.file}</b> [${mn}] — ${d.njobs} ${u} → ${d.nbills} บิล · จะสร้างใหม่ <b style="color:var(--ok)">${d.nnew}</b> บิล</div>`;
   d.bills.forEach(b=>{
     h+=`<div class="bill ${b.skipped?'skip':''}"><h3>${b.skipped?'⏭ '+b.youref:'● '+b.docnum}
         <span class="tag ${b.skipped?'skip':'new'}">${b.skipped?'มีในระบบแล้ว':'สร้างใหม่'}</span></h3>
@@ -331,7 +355,7 @@ class H(BaseHTTPRequestHandler):
             elif u.path == "/api/preview":
                 self._send(200, json.dumps(preview_data(arg("xls")), ensure_ascii=False))
             elif u.path == "/api/verify":
-                self._send(200, json.dumps({"text": capture(EX.cmd_verify, _args(arg("xls")))}, ensure_ascii=False))
+                self._send(200, json.dumps({"text": verify_text(arg("xls"))}, ensure_ascii=False))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception:
