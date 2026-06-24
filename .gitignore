@@ -1,0 +1,21 @@
+# ⛔ ห้าม commit ข้อมูลบัญชีจริงขึ้น GitHub เด็ดขาด
+NS68-69/
+NS68-69-Excel/
+NS68-69-IMG/
+NS68-69-*/
+_backup_*/
+*.DBF
+*.CDX
+*.xls
+*.FPT
+
+# การตั้งค่าเฉพาะเครื่อง
+express_config.json
+
+# ไฟล์ build / ชั่วคราว
+__pycache__/
+build/
+dist/
+*.spec
+*.pyc
+.DS_Store
