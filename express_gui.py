@@ -5,7 +5,7 @@ express_gui.py — หน้าจอกดใช้งาน (เว็บใ�
 รัน:  python3 express_gui.py     แล้วเบราว์เซอร์จะเปิดให้อัตโนมัติ
 เลือกโฟลเดอร์ฐานข้อมูล (DBF) และเลือกไฟล์ xls โดยตรงได้จากหน้าจอ (จำค่าไว้ในไฟล์ config)
 """
-import os, io, sys, glob, json, socket, threading, webbrowser, contextlib, traceback, argparse
+import os, io, sys, glob, json, socket, threading, webbrowser, contextlib, traceback, argparse, hashlib, secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -25,21 +25,31 @@ CONFIG_FILE = os.path.join(HERE, "express_config.json")
 UPLOAD_DIR  = os.path.join(HERE, "uploads")     # ไฟล์ xls ที่ client อัปโหลดมา
 REQUIRED = ["ARTRN", "GLJNL", "GLJNLIT", "ISVAT", "STCRD", "ISRUN"]   # ตารางที่ต้องมี
 XLS_FILE = ""   # ไฟล์ xls ที่เลือกไว้ (path เต็ม)
+AUTH_HASH = None             # รหัสผ่าน (เก็บแบบ hash)
+TOKENS = set()               # token ที่ login แล้ว (อยู่ในหน่วยความจำ; รีสตาร์ท = login ใหม่)
+
+def pw_hash(pw): return hashlib.sha256(("express::"+pw).encode("utf-8")).hexdigest()
+def set_password(pw):
+    global AUTH_HASH
+    AUTH_HASH = pw_hash(pw); save_config()
+def new_token():
+    t = secrets.token_hex(16); TOKENS.add(t); return t
 
 # ───────── config ─────────
 def load_config():
-    global XLS_FILE
+    global XLS_FILE, AUTH_HASH
     cfg = {"db_dir": EX.DB_DIR, "xls_file": ""}
     if os.path.exists(CONFIG_FILE):
         try: cfg.update(json.load(open(CONFIG_FILE, encoding="utf-8")))
         except Exception: pass
     if cfg.get("db_dir"):  EX.DB_DIR = cfg["db_dir"]
     XLS_FILE = cfg.get("xls_file") or ""
+    AUTH_HASH = cfg.get("auth_hash")
     if XLS_FILE: EX.XLS_DIR = os.path.dirname(XLS_FILE)
     return cfg
 
 def save_config():
-    json.dump({"db_dir": EX.DB_DIR, "xls_file": XLS_FILE},
+    json.dump({"db_dir": EX.DB_DIR, "xls_file": XLS_FILE, "auth_hash": AUTH_HASH},
               open(CONFIG_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
 def db_ok(path):
@@ -192,7 +202,9 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
 .dim{color:var(--mut);font-size:12px}
 </style></head><body>
 <h1>🧾 นำเข้าข้อมูลศูนย์บริการ → โปรแกรมบัญชี Express</h1>
-<div class="sub">รวมรายการตามวันที่ → สร้างบิลขายเงินสด (โปรแกรมจะเลือกชนิดบิลให้อัตโนมัติจากหัวคอลัมน์ของไฟล์)</div>
+<div class="sub">รวมรายการตามวันที่ → สร้างบิลขายเงินสด (โปรแกรมจะเลือกชนิดบิลให้อัตโนมัติจากหัวคอลัมน์ของไฟล์)
+  &nbsp;·&nbsp; <a onclick="changePw()" style="color:var(--ac);cursor:pointer">🔑 เปลี่ยนรหัส</a>
+  &nbsp;·&nbsp; <a onclick="logout()" style="color:var(--mut);cursor:pointer">ออกจากระบบ</a></div>
 
 <div class="tabs">
   <div class="tab" id="tab-service">🔧 ขายสด-ศูนย์บริการ (HC)</div>
@@ -249,9 +261,27 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
   </div>
 </div></div>
 
+<!-- login / ตั้งรหัส -->
+<div id="auth" style="position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:20">
+  <div class="mbox" style="width:min(380px,92vw)">
+    <div class="mhead" id="authtitle">🔒 เข้าสู่ระบบ</div>
+    <div class="dim" id="authmsg" style="margin-bottom:12px"></div>
+    <input class="path" id="authpw" type="password" placeholder="รหัสผ่าน" style="margin-bottom:12px"
+           onkeydown="if(event.key==='Enter')authSubmit()">
+    <button class="b-com" id="authbtn" style="width:100%" onclick="authSubmit()">เข้าสู่ระบบ</button>
+  </div>
+</div>
+
 <script>
 const $=s=>document.querySelector(s);
 let selXls='';
+let TOKEN=localStorage.getItem('exp_token')||'';
+async function afetch(url,opts){
+  opts=opts||{}; opts.headers=Object.assign({},opts.headers||{},{'X-Auth':TOKEN});
+  const r=await fetch(url,opts);
+  if(r.status===401){ TOKEN=''; localStorage.removeItem('exp_token'); showLogin(); throw new Error('ต้องเข้าสู่ระบบ'); }
+  return r;
+}
 const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'},purchase:{name:'ซื้ออะไหล่',unit:'ใบรับ'}};
 function setMode(m){
   $('#tab-service').classList.toggle('on',m==='service');
@@ -263,7 +293,7 @@ function busy(b,msg){$('#status').innerHTML=b?'<span class="spin"></span> '+msg:
   document.querySelectorAll('.card button').forEach(x=>x.disabled=b);}
 
 async function loadConfig(){
-  const c=await (await fetch('/api/config')).json();
+  const c=await (await afetch('/api/config')).json();
   $('#db').value=c.db_dir||''; $('#xlsfile').value=c.xls_file||''; selXls=c.xls_file||'';
   const db=$('#dbbadge'); db.className='badge '+(c.db_ok?'ok':'bad');
   db.textContent=c.db_ok?'✓ พบฐานข้อมูล':'✗ ไม่พบ DBF'+(c.db_missing&&c.db_missing.length?' ('+c.db_missing.slice(0,3).join(',')+'…)':'');
@@ -283,7 +313,7 @@ async function doUpload(file){
   busy(true,'กำลังอัปโหลด '+file.name+' ...');
   try{
     const buf=await file.arrayBuffer();
-    const r=await fetch('/api/upload',{method:'POST',
+    const r=await afetch('/api/upload',{method:'POST',
       headers:{'X-Filename':encodeURIComponent(file.name),'Content-Type':'application/octet-stream'},body:buf});
     const d=await r.json();
     if(d.error){$('#result').innerHTML='<pre style="color:#fca5a5">'+d.error+'</pre>';}
@@ -311,10 +341,10 @@ async function act(cmd){
   busy(true, cmd==='preview'?'กำลังคำนวณ...':'กำลังตรวจสอบ...');
   try{
     if(cmd==='preview'){
-      const d=await (await fetch('/api/preview?xls='+encodeURIComponent(selXls))).json();
+      const d=await (await afetch('/api/preview?xls='+encodeURIComponent(selXls))).json();
       d.error?$('#result').innerHTML='<pre style="color:#fca5a5">'+d.error+'</pre>':renderPreview(d);
     }else{
-      const d=await (await fetch('/api/'+cmd+'?xls='+encodeURIComponent(selXls))).json();
+      const d=await (await afetch('/api/'+cmd+'?xls='+encodeURIComponent(selXls))).json();
       $('#result').innerHTML='<pre>'+(d.text||d.error)+'</pre>';
     }
   }catch(e){$('#result').innerHTML='<pre style="color:#fca5a5">'+e+'</pre>';}
@@ -325,7 +355,7 @@ async function commit(){
   if(!confirm('ยืนยันบันทึกลงฐานข้อมูลจริง?\n\n• ปิดโปรแกรม Express ก่อน\n• ระบบจะสำรองไฟล์ให้อัตโนมัติ\n• หลังบันทึกต้อง Reindex + คำนวณยอดใน Express'))return;
   busy(true,'กำลังบันทึก...');
   try{
-    const d=await (await fetch('/api/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({xls:selXls})})).json();
+    const d=await (await afetch('/api/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({xls:selXls})})).json();
     $('#result').innerHTML='<pre>'+(d.text||d.error)+'</pre>'; $('#note').style.display='block';
   }catch(e){$('#result').innerHTML='<pre style="color:#fca5a5">'+e+'</pre>';}
   busy(false,'บันทึกเสร็จ'); loadConfig();
@@ -347,7 +377,7 @@ function openPick(target){
 function closePick(){$('#modal').style.display='none';}
 async function browse(path){
   const isFile = pickTarget==='xlsfile';
-  const d=await (await fetch('/api/listdir?path='+encodeURIComponent(path||'')+(isFile?'&files=1':''))).json();
+  const d=await (await afetch('/api/listdir?path='+encodeURIComponent(path||'')+(isFile?'&files=1':''))).json();
   curPath=d.path;
   $('#mpath').textContent='📍 '+d.path + (d.self_dbf&&!isFile?'   ✓ โฟลเดอร์นี้มี DBF':'');
   let sh=`<span class="chip" onclick='browse(${JSON.stringify(d.home)})'>🏠 Home</span>`;
@@ -375,10 +405,35 @@ async function selectFile(p){
   $('#result').innerHTML='<div style="color:var(--mut)">เลือกไฟล์แล้ว — กดดูตัวอย่างบิลได้เลย</div>';
 }
 async function postCfg(body){
-  return (await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  return (await afetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
 }
 document.getElementById('uplinput').addEventListener('change',e=>doUpload(e.target.files[0]));
-loadConfig();
+
+/* ---- auth (login / ตั้งรหัส) ---- */
+let authMode='login';
+function showLogin(){authMode='login';$('#authtitle').textContent='🔒 เข้าสู่ระบบ';
+  $('#authmsg').textContent='ใส่รหัสผ่านเพื่อใช้งานโปรแกรม';$('#authmsg').style.color='var(--mut)';
+  $('#authbtn').textContent='เข้าสู่ระบบ';$('#authpw').value='';$('#auth').style.display='flex';setTimeout(()=>$('#authpw').focus(),50);}
+function showSetup(t){authMode='setup';$('#authtitle').textContent=t||'🔑 ตั้งรหัสผ่านครั้งแรก';
+  $('#authmsg').textContent='ตั้งรหัสผ่านสำหรับเข้าใช้งาน (อย่างน้อย 4 ตัว)';$('#authmsg').style.color='var(--mut)';
+  $('#authbtn').textContent='บันทึกรหัสและเข้าใช้';$('#authpw').value='';$('#auth').style.display='flex';setTimeout(()=>$('#authpw').focus(),50);}
+function changePw(){showSetup('🔑 เปลี่ยนรหัสผ่าน');}
+async function authSubmit(){
+  const pw=$('#authpw').value;
+  const ep=authMode==='setup'?'/api/setpassword':'/api/login';
+  const d=await (await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json','X-Auth':TOKEN},body:JSON.stringify({password:pw})})).json();
+  if(d.ok){TOKEN=d.token;localStorage.setItem('exp_token',TOKEN);$('#auth').style.display='none';loadConfig();}
+  else{$('#authmsg').textContent=d.error||'รหัสผ่านไม่ถูกต้อง';$('#authmsg').style.color='#fca5a5';}
+}
+function logout(){TOKEN='';localStorage.removeItem('exp_token');showLogin();}
+async function boot(){
+  const a=await (await fetch('/api/auth')).json();
+  if(!a.hasPassword) return showSetup();
+  if(!TOKEN) return showLogin();
+  try{ await loadConfig(); $('#auth').style.display='none'; }  // token ใช้ได้ -> เข้าแอป
+  catch(e){ /* afetch เด้ง login ให้แล้ว */ }
+}
+boot();
 </script></body></html>"""
 
 # ───────── HTTP ─────────
@@ -390,13 +445,19 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(b))); self.end_headers()
         self.wfile.write(b)
 
+    def _authed(self): return self.headers.get("X-Auth") in TOKENS
+
     def do_GET(self):
         u = urlparse(self.path); q = parse_qs(u.query)
         arg = lambda k: (q.get(k) or [None])[0]
         try:
             if u.path == "/":
-                self._send(200, HTML, "text/html; charset=utf-8")
-            elif u.path == "/api/config":
+                self._send(200, HTML, "text/html; charset=utf-8"); return
+            if u.path == "/api/auth":      # สถานะรหัสผ่าน (ไม่ต้อง login)
+                self._send(200, json.dumps({"hasPassword": bool(AUTH_HASH)})); return
+            if not self._authed():         # ทุก api อื่นต้อง login ก่อน
+                self._send(401, json.dumps({"error": "unauthorized"})); return
+            if u.path == "/api/config":
                 self._send(200, json.dumps(config_status(), ensure_ascii=False))
             elif u.path == "/api/listdir":
                 self._send(200, json.dumps(listdir(arg("path"), want_files=bool(arg("files"))), ensure_ascii=False))
@@ -415,6 +476,27 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n)
         try:
+            # ---- auth endpoints (เปิดได้โดยไม่ต้อง login) ----
+            if u.path == "/api/login":
+                pw = json.loads(body or b"{}").get("password", "")
+                if AUTH_HASH and pw_hash(pw) == AUTH_HASH:
+                    self._send(200, json.dumps({"ok": True, "token": new_token()}))
+                else:
+                    self._send(200, json.dumps({"ok": False}))
+                return
+            if u.path == "/api/setpassword":
+                # ตั้งรหัสครั้งแรก (ยังไม่มีรหัส) หรือเปลี่ยนรหัส (ต้อง login แล้ว)
+                if AUTH_HASH and not self._authed():
+                    self._send(401, json.dumps({"error": "unauthorized"})); return
+                pw = json.loads(body or b"{}").get("password", "")
+                if len(pw) < 4:
+                    self._send(200, json.dumps({"ok": False, "error": "รหัสสั้นเกินไป (อย่างน้อย 4 ตัว)"})); return
+                set_password(pw)
+                self._send(200, json.dumps({"ok": True, "token": new_token()}))
+                return
+            # ---- ทุก POST อื่นต้อง login ----
+            if not self._authed():
+                self._send(401, json.dumps({"error": "unauthorized"})); return
             if u.path == "/api/upload":
                 from urllib.parse import unquote
                 fn = os.path.basename(unquote(self.headers.get("X-Filename", "upload.xls")))
