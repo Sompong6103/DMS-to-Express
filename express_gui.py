@@ -96,7 +96,8 @@ def listdir(path, want_files=False):
         entries = sorted(os.scandir(path), key=lambda x: x.name.lower())
     except PermissionError:
         entries = []
-    xls_here = [e for e in entries if e.is_file() and e.name.lower().endswith(".xls")]
+    XEXT = (".xls", ".xlsx")
+    xls_here = [e for e in entries if e.is_file() and e.name.lower().endswith(XEXT)]
     count_jobs = want_files and len(xls_here) <= 60      # ถ้าไฟล์เยอะมากไม่นับงาน (ช้า)
     for e in entries:
         if e.name.startswith("."): continue
@@ -106,8 +107,8 @@ def listdir(path, want_files=False):
             upper = {n.upper() for n in names}
             dirs.append({"name": e.name, "path": e.path,
                          "dbf": "ARTRN.DBF" in upper,
-                         "xls": any(n.lower().endswith(".xls") for n in names)})
-        elif want_files and e.is_file() and e.name.lower().endswith(".xls"):
+                         "xls": any(n.lower().endswith(XEXT) for n in names)})
+        elif want_files and e.is_file() and e.name.lower().endswith(XEXT):
             files.append({"name": e.name, "path": e.path,
                           "jobs": xls_jobs(e.path) if count_jobs else None})
     parent = os.path.dirname(path)
@@ -134,9 +135,7 @@ def capture(fn, *a, **k):
 def preview_data(xls):
     mode, bills = EX.load_source(xls)
     t     = EX.open_tables()
-    hdr   = "APTRN" if mode=="purchase" else "ARTRN"
-    dedup = "REFNUM" if mode=="purchase" else "YOUREF"
-    plan  = EX.next_numbers(t[hdr], bills, dedup_field=dedup)
+    plan  = EX.plan_docnums(mode, t, bills)
     out   = []
     for b, docnum in plan:
         out.append({"docnum": docnum, "skipped": docnum is None,
@@ -166,8 +165,18 @@ def verify_purchase(xls):
     print("บัญชี: Dr สินค้าคงเหลือ 1162-01 + Dr ภาษีซื้อ 1194-01  /  Cr เจ้าหนี้ "+str(ven.get('APACC')))
     print("\n✓ โครงสร้างถูกต้อง (ยอด/บัญชี/สมดุล) — ดูรายละเอียดแต่ละบิลที่ปุ่มดูตัวอย่าง")
 
+def verify_petty(xls):
+    mode, bills = EX.load_source(xls)
+    print(f"โหมดจ่ายเงินสดย่อย (DP): {len(bills)} เอกสาร (แต่ละแถว = 1 เอกสาร)")
+    tot = sum(b["sub"] for b in bills)
+    print(f"ยอดรวมทั้งหมด: {tot:,.2f} บาท")
+    print("แต่ละเอกสาร: GLPTT (หัว) + GLPTTIT (รายการเดียว) — ประเภทเป็นข้อความ, แผนกเว้นว่าง, ไม่มี VAT")
+    print("เอกสาร DP จะยังไม่ผ่านบัญชี (DOCSTAT=N) ตามรูปแบบเงินสดย่อยปกติ")
+    print("\n✓ โครงสร้างถูกต้อง — ดูรายละเอียดแต่ละเอกสารที่ปุ่มดูตัวอย่าง")
+
 def verify_text(xls):
     m = EX.detect_mode(xls)
+    if m=="petty":    return capture(verify_petty, xls)
     if m=="purchase": return capture(verify_purchase, xls)
     fn = EX.cmd_verify_parts if m=="parts" else EX.cmd_verify
     return capture(fn, _args(xls))
@@ -226,6 +235,7 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
   <div class="tab" id="tab-service">🔧 ขายสด-ศูนย์บริการ (HC)</div>
   <div class="tab" id="tab-parts">🔩 ขายสด-อะไหล่ (HO)</div>
   <div class="tab" id="tab-purchase">📦 ซื้อเชื่อ-อะไหล่ (RS)</div>
+  <div class="tab" id="tab-petty">💵 จ่ายเงินสดย่อย (DP)</div>
 </div>
 
 <div class="card">
@@ -246,7 +256,7 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
     <button class="b-pick sm" onclick="openPick('xlsfile')">เลือกบน server…</button>
     <span id="xlsbadge" class="badge"></span>
   </div>
-  <input type="file" id="uplinput" accept=".xls" style="display:none">
+  <input type="file" id="uplinput" accept=".xls,.xlsx" style="display:none">
   <div class="dim" style="margin-top:-4px">⬆️ อัปโหลด = ใช้ไฟล์ xls จากเครื่องที่เปิดหน้านี้  ·  เลือกบน server = ไฟล์ที่อยู่บนเครื่องหลัก</div>
   <div class="btns">
     <button class="b-prev" onclick="act('preview')">👁 ดูตัวอย่างบิล</button>
@@ -298,11 +308,12 @@ async function afetch(url,opts){
   if(r.status===401){ TOKEN=''; localStorage.removeItem('exp_token'); showLogin(); throw new Error('ต้องเข้าสู่ระบบ'); }
   return r;
 }
-const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'},purchase:{name:'ซื้ออะไหล่',unit:'ใบรับ'}};
+const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'},purchase:{name:'ซื้ออะไหล่',unit:'ใบรับ'},petty:{name:'จ่ายเงินสดย่อย',unit:'รายการ'}};
 function setMode(m){
   $('#tab-service').classList.toggle('on',m==='service');
   $('#tab-parts').classList.toggle('on',m==='parts');
   $('#tab-purchase').classList.toggle('on',m==='purchase');
+  $('#tab-petty').classList.toggle('on',m==='petty');
 }
 function fmt(n){return n.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}
 function busy(b,msg){$('#status').innerHTML=b?'<span class="spin"></span> '+msg:(msg||'');
@@ -517,7 +528,7 @@ class H(BaseHTTPRequestHandler):
             if u.path == "/api/upload":
                 from urllib.parse import unquote
                 fn = os.path.basename(unquote(self.headers.get("X-Filename", "upload.xls")))
-                if not fn.lower().endswith(".xls"): fn += ".xls"
+                if not fn.lower().endswith((".xls", ".xlsx")): fn += ".xls"
                 os.makedirs(UPLOAD_DIR, exist_ok=True)
                 path = os.path.join(UPLOAD_DIR, fn)
                 with open(path, "wb") as f: f.write(body)

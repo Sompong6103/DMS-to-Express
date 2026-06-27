@@ -9,9 +9,9 @@ where py >nul 2>nul && set PY=py
 if not defined PY where python >nul 2>nul && set PY=python
 if not defined PY goto NOPY
 echo ติดตั้ง pyinstaller + xlrd ...
-%PY% -m pip install --upgrade pyinstaller xlrd
+%PY% -m pip install --upgrade pyinstaller xlrd openpyxl
 echo กำลัง build ...
-%PY% -m PyInstaller --onefile --console --name ExpressImport --hidden-import xlrd express_gui.py
+%PY% -m PyInstaller --onefile --console --name ExpressImport --hidden-import xlrd --collect-all openpyxl express_gui.py
 echo.
 echo เสร็จแล้ว -^> dist\ExpressImport.exe
 echo (นำ ExpressImport.exe ไปวางที่เครื่องไหนก็รันได้เลย ไม่ต้องลง Python)

@@ -9,7 +9,7 @@ where py >nul 2>nul && set PY=py
 if not defined PY where python >nul 2>nul && set PY=python
 if not defined PY goto NOPY
 echo ตรวจสอบ/ติดตั้งไลบรารี xlrd ...
-%PY% -c "import xlrd" 2>nul || %PY% -m pip install xlrd
+%PY% -c "import xlrd, openpyxl" 2>nul || %PY% -m pip install xlrd openpyxl
 echo เปิดโปรแกรม... (ปิดหน้าต่างนี้เพื่อหยุดโปรแกรม)
 %PY% express_gui.py
 goto END

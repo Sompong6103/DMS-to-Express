@@ -25,10 +25,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller xlrd
+          pip install pyinstaller xlrd openpyxl
 
       - name: Build ExpressImport.exe
-        run: pyinstaller --onefile --console --name ExpressImport --hidden-import xlrd express_gui.py
+        run: pyinstaller --onefile --console --name ExpressImport --hidden-import xlrd --collect-all openpyxl express_gui.py
 
       - name: Create launchers (แชร์ LAN เป็นค่าเริ่มต้น + เฉพาะเครื่องนี้)
         shell: pwsh

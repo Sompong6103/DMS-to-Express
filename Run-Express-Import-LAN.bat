@@ -9,7 +9,7 @@ set PY=
 where py >nul 2>nul && set PY=py
 if not defined PY where python >nul 2>nul && set PY=python
 if not defined PY goto NOPY
-%PY% -c "import xlrd" 2>nul || %PY% -m pip install xlrd
+%PY% -c "import xlrd, openpyxl" 2>nul || %PY% -m pip install xlrd openpyxl
 %PY% express_gui.py --lan
 goto END
 :NOPY

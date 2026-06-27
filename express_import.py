@@ -55,6 +55,9 @@ PUR_DESC    = "ซื้อเชื่อจาก"
 PUR_ACCFROM = "1133-01"    # CHGACCFROM
 PUR_SUPCOD  = "P078"       # ผู้ขายหลักของรายงานนี้ (นิสสันมอเตอร์) — กำหนดตรงกันชื่อซ้ำ
 
+# ───── โหมดจ่ายเงินสดย่อย (DP = จ่ายคชจ.จากเงินทดรองจ่ายย่อย) ─────
+PETTY_REFNUM = ""          # ใบเบิก (VR...) เว้นว่างไว้ (ระบุภายหลังได้)
+
 # คอลัมน์ xls -> (รหัสสินค้าบริการ STKCOD, บัญชีรายได้ GL, คำอธิบาย)  เรียงตามลำดับบรรทัดในบิล
 CATEGORIES = [
     ("PARTNET", "41-7100-01", "4171-01", "รายได้ศูนย์บริการทั่วไป-อะไหล่(เงินสด)"),
@@ -144,10 +147,14 @@ class DBF:
         return bytes(out)
 
     def append(self, records):
+        # บางตาราง (dBASE 0x03 เช่น GLPTT) มี EOF marker 0x1A ท้ายไฟล์ — ตัดออกก่อนต่อ record
+        had_eof = self.data[-1:] == b"\x1a"
+        if had_eof: del self.data[-1]
         for rec in records:
             self.data += rec
         self.nrec += len(records)
         struct.pack_into("<I", self.data, 4, self.nrec)
+        if had_eof: self.data += b"\x1a"     # ใส่ EOF กลับให้เหมือนเดิม
         # last-update date (YY-1900, MM, DD)
         today = TODAY
         self.data[1] = today.year - 1900
@@ -211,10 +218,21 @@ def group_bills(jobs):
     return bills
 
 # ───────────────────────── โหมดอะไหล่ (parts) ─────────────────────────
-def detect_mode(path):
-    """ดูจากหัวคอลัมน์ว่าเป็นไฟล์ศูนย์บริการ / อะไหล่ขายสด / ซื้อเงินเชื่อ"""
+def _read_header(path):
+    """อ่านหัวคอลัมน์ รองรับทั้ง .xls (xlrd) และ .xlsx (openpyxl)"""
+    if path.lower().endswith(".xlsx"):
+        import openpyxl
+        ws = openpyxl.load_workbook(path, read_only=True, data_only=True).active
+        for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+            return [("" if c is None else str(c).strip()) for c in row]
+        return []
     import xlrd
-    hdr = [str(h).strip() for h in xlrd.open_workbook(path).sheet_by_index(0).row_values(0)]
+    return [str(h).strip() for h in xlrd.open_workbook(path).sheet_by_index(0).row_values(0)]
+
+def detect_mode(path):
+    """ดูจากหัวคอลัมน์ว่าเป็นไฟล์โหมดไหน"""
+    hdr = _read_header(path)
+    if "เลขที่เอกสาร" in hdr:                          return "petty"
     if "INVNO" in hdr and ("RECVNO" in hdr or "APNAME" in hdr): return "purchase"
     if "ยอดสุทธิ" in hdr or "เลขที่ใบกำกับ" in hdr: return "parts"
     if "SERVNET" in hdr or "JOBNO" in hdr:          return "service"
@@ -319,6 +337,40 @@ def group_purchase_bills(rows):
                       "invno":v["INVNO"], "apname":v["APNAME"], "vendor":ven,
                       "lines":[{"stk":PUR_STKCOD, "acc":PUR_INV_ACC, "des":PUR_STKDES, "amt":net}],
                       "sub":net, "vat":vat, "total":r2(net+vat), "njobs":1})
+    return bills
+
+# ───────────────────────── โหมดจ่ายเงินสดย่อย (petty) ─────────────────────────
+def read_petty(path):
+    """อ่านไฟล์ .xlsx เงินสดย่อย: เลขที่เอกสาร/ประเภท/หมายเหตุ/รายละเอียด/จำนวนเงิน/วันที่/เลขที่บัญชี"""
+    import openpyxl
+    ws = openpyxl.load_workbook(path, data_only=True).active
+    hdr = None; out = []
+    for row in ws.iter_rows(values_only=True):
+        if hdr is None:
+            hdr = {("" if c is None else str(c).strip()): i for i, c in enumerate(row)}; continue
+        g = lambda name: row[hdr[name]] if name in hdr and hdr[name] < len(row) else None
+        docnum = str(g("เลขที่เอกสาร") or "").strip()
+        if not docnum: continue
+        dv = g("วันที่")
+        if hasattr(dv, "year"):
+            y = dv.year; y = 1957 + (y % 100) if y < 2000 else y   # ปีเก็บเป็น 19xx (พ.ศ.ย่อ) -> ค.ศ.
+            d = datetime.date(y, dv.month, dv.day)
+        else:
+            d = TODAY
+        out.append({"DOCNUM":docnum, "DOCTYP":str(g("ประเภท") or "").strip(),
+                    "REMARK":str(g("หมายเหตุ") or "").strip(), "DESCRP":str(g("รายละเอียด") or "").strip(),
+                    "ACCNUM":str(g("เลขที่บัญชี") or "").strip(), "AMOUNT":r2(g("จำนวนเงิน") or 0), "DATE":d})
+    return out
+
+def group_petty_bills(rows):
+    """แต่ละแถว = 1 เอกสาร DP (ใช้เลขที่เอกสารจากไฟล์)"""
+    bills = []
+    for v in rows:
+        amt = v["AMOUNT"]
+        bills.append({"mode":"petty", "date":v["DATE"], "youref":v["DOCNUM"], "docnum":v["DOCNUM"],
+                      "doctype":v["DOCTYP"], "remark":v["REMARK"],
+                      "lines":[{"stk":v["ACCNUM"], "acc":v["ACCNUM"], "des":v["DESCRP"], "amt":amt}],
+                      "sub":amt, "vat":0.0, "total":amt, "njobs":1})
     return bills
 
 # ───────────────────────── record builders ─────────────────────────
@@ -512,17 +564,30 @@ def build_purchase_all(bill, docnum, t_aptrn, t_gljnl, t_gljit, t_isvat, t_stcrd
 
     return {"APTRN":[aptrn],"GLJNL":gljnl,"GLJNLIT":git,"ISVAT":isvat,"STCRD":stcrd}
 
+def build_petty_all(bill, docnum, t_glptt, t_glpttit):
+    """จ่ายเงินสดย่อย (DP): GLPTT (หัว) + GLPTTIT (รายการเดียว) — ประเภทเป็นข้อความ, แผนกเว้นว่าง"""
+    d, amt = bill["date"], bill["sub"]
+    l = bill["lines"][0]
+    glptt = t_glptt.build_record({
+        "RECTYP":"1","DOCNUM":docnum,"DOCDAT":D(d),"DOCTYP":bill["doctype"],"PTTSTAT":"",
+        "DOCSTAT":"N","AMOUNT":amt,"REMARK":bill["remark"],"REFNUM":PETTY_REFNUM,
+        "USERID":USER_ID,"CHGDAT":D(TODAY)})
+    glpttit = t_glpttit.build_record({
+        "DOCNUM":docnum,"ACCNUM":l["acc"],"DEPCOD":"","DESCRP":l["des"],"AMOUNT":amt})
+    return {"GLPTT":[glptt], "GLPTTIT":[glpttit]}
+
 def build_bill(bill, docnum, t):
     """เลือก builder ตามโหมดของบิล"""
     m = bill.get("mode")
-    if m=="purchase":
-        return build_purchase_all(bill, docnum, t["APTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
+    if m=="petty":    return build_petty_all(bill, docnum, t["GLPTT"], t["GLPTTIT"])
+    if m=="purchase": return build_purchase_all(bill, docnum, t["APTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
     fn = build_parts_all if m=="parts" else build_all
     return fn(bill, docnum, t["ARTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
 
 def load_source(xls):
     """อ่านไฟล์ -> (mode, bills)"""
     mode = detect_mode(xls)
+    if mode=="petty":    return mode, group_petty_bills(read_petty(xls))
     if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls))
     if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls))
     return mode, group_bills(read_xls_jobs(xls))
@@ -554,12 +619,13 @@ def next_numbers(t_hdr, bills, prefix=None, dedup_field="YOUREF"):
 # ───────────────────────── commands ─────────────────────────
 def open_tables():
     return {n: DBF(os.path.join(DB_DIR, n+".DBF"))
-            for n in ["ARTRN","APTRN","GLJNL","GLJNLIT","ISVAT","STCRD"]}
+            for n in ["ARTRN","APTRN","GLJNL","GLJNLIT","ISVAT","STCRD","GLPTT","GLPTTIT"]}
 
 def count_items(path):
     """นับจำนวนรายการในไฟล์ตามโหมด"""
     m = detect_mode(path)
-    rd = {"parts":read_parts_invoices, "purchase":read_purchase_receipts}.get(m, read_xls_jobs)
+    rd = {"parts":read_parts_invoices, "purchase":read_purchase_receipts,
+          "petty":read_petty}.get(m, read_xls_jobs)
     return len(rd(path))
 
 def pick_xls(arg):
@@ -568,15 +634,22 @@ def pick_xls(arg):
     if not xs: sys.exit("ไม่พบไฟล์ .xls ที่มีข้อมูลใน " + XLS_DIR)
     return sorted(xs)[0]
 
+def plan_docnums(mode, t, bills):
+    """คืน [(bill, docnum|None)] — petty ใช้เลขจากไฟล์, อื่นๆ รันต่อจากตารางหัว"""
+    if mode == "petty":
+        have = {t["GLPTT"].get(i).get("DOCNUM") for i in range(len(t["GLPTT"]))}
+        return [(b, None if b["docnum"] in have else b["docnum"]) for b in bills]
+    hdr   = "APTRN" if mode == "purchase" else "ARTRN"
+    dedup = "REFNUM" if mode == "purchase" else "YOUREF"
+    return next_numbers(t[hdr], bills, dedup_field=dedup)
+
 def cmd_preview(args, commit=False):
     xls = pick_xls(args.xls)
     mode, bills = load_source(xls)
-    unit = {"parts":"ใบกำกับ","purchase":"ใบรับ"}.get(mode,"งาน")
+    unit = {"parts":"ใบกำกับ","purchase":"ใบรับ","petty":"รายการ"}.get(mode,"งาน")
     nitems = sum(b["njobs"] for b in bills)
     t = open_tables()
-    hdr_tbl = "APTRN" if mode=="purchase" else "ARTRN"
-    dedup = "REFNUM" if mode=="purchase" else "YOUREF"
-    plan = next_numbers(t[hdr_tbl], bills, dedup_field=dedup)
+    plan = plan_docnums(mode, t, bills)
 
     print(f"ไฟล์ต้นทาง : {os.path.basename(xls)}  [โหมด {mode}]  ({nitems} {unit} -> {len(bills)} บิล)")
     print("="*64)
@@ -624,10 +697,13 @@ def cmd_preview(args, commit=False):
     if mode=="service": update_isrun(new)
     else: print("  (เลขรันคำนวณต่อจากเอกสารเดิม — ไม่แก้ ISRUN)")
     print("\n✓ เขียนข้อมูลเรียบร้อย")
-    print("‼️  ขั้นต่อไปใน Express: เริ่มระบบ -> จัดการแฟ้มข้อมูล ->")
-    print("    1) จัดเรียงดัชนีใหม่ (Reindex)   2) คำนวณยอดบัญชี/ยอดยกมาใหม่")
-    if mode=="purchase":
-        print("    3) คำนวณต้นทุน/ยอดสินค้าคงเหลือใหม่   4) คำนวณยอดเจ้าหนี้ใหม่")
+    print("‼️  ขั้นต่อไปใน Express: เริ่มระบบ -> จัดการแฟ้มข้อมูล -> จัดเรียงดัชนีใหม่ (Reindex)")
+    if mode=="petty":
+        print("    หมายเหตุ: เอกสาร DP ยังไม่ผ่านบัญชี (DOCSTAT=N) — ตรวจ/ผ่านรายการเงินทดรองจ่ายใน Express ตามปกติ")
+    else:
+        print("    + คำนวณยอดบัญชี/ยอดยกมาใหม่")
+        if mode=="purchase":
+            print("    + คำนวณต้นทุน/ยอดสินค้าคงเหลือใหม่   + คำนวณยอดเจ้าหนี้ใหม่")
 
 def update_isrun(new):
     path = os.path.join(DB_DIR, "ISRUN.DBF")
