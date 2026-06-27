@@ -31,6 +31,26 @@ jobs:
       - name: Build ExpressImport.exe (32-bit, รันได้ทั้ง Win7/10/11)
         run: pyinstaller --onefile --console --name ExpressImport --hidden-import xlrd --collect-all openpyxl express_gui.py
 
+      - name: Patch PE header -> minimum OS 6.1 (Windows 7)
+        shell: python
+        run: |
+          import struct
+          f = "dist/ExpressImport.exe"
+          d = bytearray(open(f, "rb").read())
+          pe = struct.unpack_from("<I", d, 0x3C)[0]
+          assert d[pe:pe+4] == b"PE\x00\x00", "not a PE file"
+          machine = struct.unpack_from("<H", d, pe+4)[0]
+          opt = pe + 24
+          osv = struct.unpack_from("<H", d, opt+40)[0]
+          ssv = struct.unpack_from("<H", d, opt+48)[0]
+          print(f"machine=0x{machine:x} (0x14c=32bit,0x8664=64bit)  before: OSver={osv} SubsysVer={ssv}")
+          struct.pack_into("<H", d, opt+40, 6)   # MajorOperatingSystemVersion
+          struct.pack_into("<H", d, opt+42, 1)   # MinorOperatingSystemVersion
+          struct.pack_into("<H", d, opt+48, 6)   # MajorSubsystemVersion
+          struct.pack_into("<H", d, opt+50, 1)   # MinorSubsystemVersion
+          open(f, "wb").write(d)
+          print("patched -> minimum OS/Subsystem = 6.1 (Windows 7)")
+
       - name: Create launchers (แชร์ LAN เป็นค่าเริ่มต้น + เฉพาะเครื่องนี้)
         shell: pwsh
         run: |
