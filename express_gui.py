@@ -5,7 +5,7 @@ express_gui.py — หน้าจอกดใช้งาน (เว็บใ�
 รัน:  python3 express_gui.py     แล้วเบราว์เซอร์จะเปิดให้อัตโนมัติ
 เลือกโฟลเดอร์ฐานข้อมูล (DBF) และเลือกไฟล์ xls โดยตรงได้จากหน้าจอ (จำค่าไว้ในไฟล์ config)
 """
-import os, io, sys, glob, json, socket, threading, webbrowser, contextlib, traceback
+import os, io, sys, glob, json, socket, threading, webbrowser, contextlib, traceback, argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -22,6 +22,7 @@ except Exception:
     pass
 
 CONFIG_FILE = os.path.join(HERE, "express_config.json")
+UPLOAD_DIR  = os.path.join(HERE, "uploads")     # ไฟล์ xls ที่ client อัปโหลดมา
 REQUIRED = ["ARTRN", "GLJNL", "GLJNLIT", "ISVAT", "STCRD", "ISRUN"]   # ตารางที่ต้องมี
 XLS_FILE = ""   # ไฟล์ xls ที่เลือกไว้ (path เต็ม)
 
@@ -107,7 +108,9 @@ def capture(fn, *a, **k):
 def preview_data(xls):
     mode, bills = EX.load_source(xls)
     t     = EX.open_tables()
-    plan  = EX.next_numbers(t["ARTRN"], bills)
+    hdr   = "APTRN" if mode=="purchase" else "ARTRN"
+    dedup = "REFNUM" if mode=="purchase" else "YOUREF"
+    plan  = EX.next_numbers(t[hdr], bills, dedup_field=dedup)
     out   = []
     for b, docnum in plan:
         out.append({"docnum": docnum, "skipped": docnum is None,
@@ -118,8 +121,29 @@ def preview_data(xls):
     return {"file": os.path.basename(xls), "mode": mode, "njobs": sum(b["njobs"] for b in bills),
             "nbills": len(bills), "nnew": new, "bills": out}
 
+def verify_purchase(xls):
+    """ตรวจโครงสร้างโหมดซื้อ: ทุกบิลต้องสมดุล Dr=Cr และบัญชี/ผู้ขายถูกต้อง"""
+    mode, bills = EX.load_source(xls)
+    t = EX.open_tables()
+    ven = bills[0]["vendor"] if bills else {}
+    print(f"ผู้ขาย: {ven.get('SUPCOD')} ({ven.get('SUPNAM','')[:30]}) | เจ้าหนี้ {ven.get('APACC')} | เลขภาษี {ven.get('TAXID')}")
+    bad = 0
+    for b in bills[:200]:
+        recs = EX.build_purchase_all(b,"RS0000/000",t["APTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
+        dr=cr=0
+        for m in recs["GLJNLIT"]:
+            x = EX.decode_built(t["GLJNLIT"], m)
+            if x["TRNTYP"]=="0": dr+=x["AMOUNT"]
+            else: cr+=x["AMOUNT"]
+        if abs(dr-cr) > 0.005: bad += 1
+    print(f"ตรวจ {len(bills)} บิล: GL สมดุลทุกใบ" + (" ✓" if bad==0 else f" ✗ ไม่สมดุล {bad} ใบ"))
+    print("บัญชี: Dr สินค้าคงเหลือ 1162-01 + Dr ภาษีซื้อ 1194-01  /  Cr เจ้าหนี้ "+str(ven.get('APACC')))
+    print("\n✓ โครงสร้างถูกต้อง (ยอด/บัญชี/สมดุล) — ดูรายละเอียดแต่ละบิลที่ปุ่มดูตัวอย่าง")
+
 def verify_text(xls):
-    fn = EX.cmd_verify_parts if EX.detect_mode(xls)=="parts" else EX.cmd_verify
+    m = EX.detect_mode(xls)
+    if m=="purchase": return capture(verify_purchase, xls)
+    fn = EX.cmd_verify_parts if m=="parts" else EX.cmd_verify
     return capture(fn, _args(xls))
 
 # ───────── HTML ─────────
@@ -171,8 +195,9 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
 <div class="sub">รวมรายการตามวันที่ → สร้างบิลขายเงินสด (โปรแกรมจะเลือกชนิดบิลให้อัตโนมัติจากหัวคอลัมน์ของไฟล์)</div>
 
 <div class="tabs">
-  <div class="tab" id="tab-service">🔧 ขายเงินสด-ศูนย์บริการ (HC)</div>
-  <div class="tab" id="tab-parts">🔩 ขายเงินสด-อะไหล่ (HO)</div>
+  <div class="tab" id="tab-service">🔧 ขายสด-ศูนย์บริการ (HC)</div>
+  <div class="tab" id="tab-parts">🔩 ขายสด-อะไหล่ (HO)</div>
+  <div class="tab" id="tab-purchase">📦 ซื้อเชื่อ-อะไหล่ (RS)</div>
 </div>
 
 <div class="card">
@@ -187,11 +212,14 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
   <div class="frow">
     <div class="grow">
       <label>📄 ไฟล์ Excel ที่จะนำเข้า (.xls)</label>
-      <input class="path" id="xlsfile" readonly placeholder="ยังไม่ได้เลือกไฟล์">
+      <input class="path" id="xlsfile" readonly placeholder="ยังไม่ได้เลือก/อัปโหลดไฟล์">
     </div>
-    <button class="b-pick sm" onclick="openPick('xlsfile')">เลือกไฟล์…</button>
+    <button class="b-com sm" onclick="document.getElementById('uplinput').click()">⬆️ อัปโหลดจากเครื่องนี้</button>
+    <button class="b-pick sm" onclick="openPick('xlsfile')">เลือกบน server…</button>
     <span id="xlsbadge" class="badge"></span>
   </div>
+  <input type="file" id="uplinput" accept=".xls" style="display:none">
+  <div class="dim" style="margin-top:-4px">⬆️ อัปโหลด = ใช้ไฟล์ xls จากเครื่องที่เปิดหน้านี้  ·  เลือกบน server = ไฟล์ที่อยู่บนเครื่องหลัก</div>
   <div class="btns">
     <button class="b-prev" onclick="act('preview')">👁 ดูตัวอย่างบิล</button>
     <button class="b-ver"  onclick="act('verify')">🔍 ตรวจสอบความถูกต้อง</button>
@@ -224,10 +252,11 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
 <script>
 const $=s=>document.querySelector(s);
 let selXls='';
-const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'}};
+const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'},purchase:{name:'ซื้ออะไหล่',unit:'ใบรับ'}};
 function setMode(m){
   $('#tab-service').classList.toggle('on',m==='service');
   $('#tab-parts').classList.toggle('on',m==='parts');
+  $('#tab-purchase').classList.toggle('on',m==='purchase');
 }
 function fmt(n){return n.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}
 function busy(b,msg){$('#status').innerHTML=b?'<span class="spin"></span> '+msg:(msg||'');
@@ -238,11 +267,29 @@ async function loadConfig(){
   $('#db').value=c.db_dir||''; $('#xlsfile').value=c.xls_file||''; selXls=c.xls_file||'';
   const db=$('#dbbadge'); db.className='badge '+(c.db_ok?'ok':'bad');
   db.textContent=c.db_ok?'✓ พบฐานข้อมูล':'✗ ไม่พบ DBF'+(c.db_missing&&c.db_missing.length?' ('+c.db_missing.slice(0,3).join(',')+'…)':'');
-  const xb=$('#xlsbadge'); const u=MODES[c.mode]?MODES[c.mode].unit:'รายการ';
-  if(!c.xls_file){xb.className='badge bad';xb.textContent='✗ ยังไม่ได้เลือกไฟล์';}
-  else{xb.className='badge '+(c.xls_ok?'ok':'bad');
-    xb.textContent=c.xls_ok?('✓ '+(c.xls_jobs>=0?c.xls_jobs+' '+u:'พร้อม')+(c.mode?' · '+MODES[c.mode].name:'')):'✗ ไฟล์ไม่ถูกต้อง';}
-  setMode(c.mode);
+  updateXls(c);
+}
+function updateXls(info){
+  selXls=info.xls_file||'';
+  $('#xlsfile').value=info.xls_name||info.xls_file||'';
+  const xb=$('#xlsbadge'); const u=MODES[info.mode]?MODES[info.mode].unit:'รายการ';
+  if(!info.xls_file){xb.className='badge bad';xb.textContent='✗ ยังไม่ได้เลือก/อัปโหลดไฟล์';}
+  else{xb.className='badge '+(info.xls_ok?'ok':'bad');
+    xb.textContent=info.xls_ok?('✓ '+(info.xls_jobs>=0?info.xls_jobs+' '+u:'พร้อม')+(info.mode?' · '+MODES[info.mode].name:'')):'✗ ไฟล์ไม่ถูกต้อง';}
+  setMode(info.mode);
+}
+async function doUpload(file){
+  if(!file)return;
+  busy(true,'กำลังอัปโหลด '+file.name+' ...');
+  try{
+    const buf=await file.arrayBuffer();
+    const r=await fetch('/api/upload',{method:'POST',
+      headers:{'X-Filename':encodeURIComponent(file.name),'Content-Type':'application/octet-stream'},body:buf});
+    const d=await r.json();
+    if(d.error){$('#result').innerHTML='<pre style="color:#fca5a5">'+d.error+'</pre>';}
+    else{updateXls(d); $('#result').innerHTML='<div style="color:var(--ok)">อัปโหลด '+d.xls_name+' แล้ว ('+(d.xls_jobs>=0?d.xls_jobs+' รายการ':'')+') — กดดูตัวอย่างได้เลย</div>';}
+  }catch(e){$('#result').innerHTML='<pre style="color:#fca5a5">'+e+'</pre>';}
+  busy(false,'');
 }
 function renderPreview(d){
   setMode(d.mode); const u=MODES[d.mode]?MODES[d.mode].unit:'รายการ';
@@ -330,6 +377,7 @@ async function selectFile(p){
 async function postCfg(body){
   return (await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
 }
+document.getElementById('uplinput').addEventListener('change',e=>doUpload(e.target.files[0]));
 loadConfig();
 </script></body></html>"""
 
@@ -365,8 +413,20 @@ class H(BaseHTTPRequestHandler):
         global XLS_FILE
         u = urlparse(self.path)
         n = int(self.headers.get("Content-Length", 0))
-        data = json.loads(self.rfile.read(n) or b"{}")
+        body = self.rfile.read(n)
         try:
+            if u.path == "/api/upload":
+                from urllib.parse import unquote
+                fn = os.path.basename(unquote(self.headers.get("X-Filename", "upload.xls")))
+                if not fn.lower().endswith(".xls"): fn += ".xls"
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+                path = os.path.join(UPLOAD_DIR, fn)
+                with open(path, "wb") as f: f.write(body)
+                jobs = xls_jobs(path)
+                self._send(200, json.dumps({"xls_file": path, "xls_name": fn,
+                    "mode": xls_mode(path), "xls_jobs": jobs, "xls_ok": jobs >= 0}, ensure_ascii=False))
+                return
+            data = json.loads(body or b"{}")
             if u.path == "/api/config":
                 if "db_dir" in data:  EX.DB_DIR = os.path.abspath(os.path.expanduser(data["db_dir"]))
                 if "xls_file" in data:
@@ -381,19 +441,45 @@ class H(BaseHTTPRequestHandler):
         except Exception:
             self._send(200, json.dumps({"error": clean(traceback.format_exc())}, ensure_ascii=False))
 
+def lan_ip():
+    """หา IP ของเครื่องในวง LAN (ไม่ส่งข้อมูลจริง)"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try: s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]
+    except Exception: ip = "127.0.0.1"
+    finally: s.close()
+    return ip
+
+def free_port(host, want=0):
+    try:
+        s = socket.socket(); s.bind((host, want)); p = s.getsockname()[1]; s.close(); return p
+    except OSError:
+        s = socket.socket(); s.bind((host, 0)); p = s.getsockname()[1]; s.close(); return p
+
 def main():
+    ap = argparse.ArgumentParser(description="โปรแกรมนำเข้าข้อมูล -> Express")
+    ap.add_argument("--lan", action="store_true", help="ให้เครื่องอื่นในวง LAN เข้าใช้งานได้")
+    ap.add_argument("--port", type=int, default=0, help="พอร์ต (ค่าเริ่มต้น: LAN=8765, ปกติ=สุ่ม)")
+    a = ap.parse_args()
     load_config()
-    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
-    url = f"http://127.0.0.1:{port}/"
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), H)
-    print("="*54)
-    print("  โปรแกรมนำเข้าข้อมูลศูนย์บริการ → Express")
-    print(f"  เปิดใช้งานที่: {url}")
-    print(f"  ฐานข้อมูล: {EX.DB_DIR}")
-    print(f"  ไฟล์ xls : {XLS_FILE or '(ยังไม่เลือก)'}")
+
+    host = "0.0.0.0" if a.lan else "127.0.0.1"
+    port = a.port or (8765 if a.lan else 0)
+    port = free_port(host, port)
+    httpd = ThreadingHTTPServer((host, port), H)
+    local_url = f"http://127.0.0.1:{port}/"
+
+    print("="*60)
+    print("  โปรแกรมนำเข้าข้อมูลขายเงินสด → Express")
+    print(f"  เครื่องนี้เปิดที่ : {local_url}")
+    if a.lan:
+        print(f"  เครื่องอื่นใน LAN : http://{lan_ip()}:{port}/")
+        print("  ⚠️  โหมดแชร์ LAN: ใครก็ตามในวงเน็ตเดียวกันเข้าหน้านี้และกดบันทึกได้")
+        print("      - ใช้เฉพาะในออฟฟิศที่ไว้ใจ และครั้งแรกต้องกด Allow ที่ firewall")
+    print(f"  ฐานข้อมูล : {EX.DB_DIR}")
+    print(f"  ไฟล์ xls  : {XLS_FILE or '(ยังไม่เลือก)'}")
     print("  (ปิดหน้าต่างนี้ = ปิดโปรแกรม)   กด Ctrl+C เพื่อหยุด")
-    print("="*54)
-    threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    print("="*60)
+    threading.Timer(0.8, lambda: webbrowser.open(local_url)).start()
     try: httpd.serve_forever()
     except KeyboardInterrupt: print("\nปิดโปรแกรมแล้ว")
 

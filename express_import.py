@@ -42,6 +42,19 @@ PARTS_INCOME = "4131-02"   # บัญชีรายได้ขายอะไ
 PARTS_STKCOD = "41-3100-02"
 PARTS_STKDES = "รายได้จากการขายอะไหล่และอุปกรณ์(เงินสด)"
 
+# ───── โหมดซื้อเงินเชื่อ-อะไหล่ (RS) ─────
+PUR_PREFIX  = "RS"         # ใบรับสินค้า/ซื้อเงินเชื่อ-อะไหล่
+PUR_DEPCOD  = "106"
+PUR_INV_ACC = "1162-01"    # เดบิต สินค้าคงเหลือ-อะไหล่
+PUR_VATIN   = "1194-01"    # เดบิต ภาษีซื้อ
+PUR_STKCOD  = "11-6200-01"
+PUR_STKDES  = "สินค้าคงเหลือ-อะไหล่และอุปกรณ์"
+PUR_PAYTRM  = 45           # เครดิต (วัน)
+PUR_JNLTYP  = "04"
+PUR_DESC    = "ซื้อเชื่อจาก"
+PUR_ACCFROM = "1133-01"    # CHGACCFROM
+PUR_SUPCOD  = "P078"       # ผู้ขายหลักของรายงานนี้ (นิสสันมอเตอร์) — กำหนดตรงกันชื่อซ้ำ
+
 # คอลัมน์ xls -> (รหัสสินค้าบริการ STKCOD, บัญชีรายได้ GL, คำอธิบาย)  เรียงตามลำดับบรรทัดในบิล
 CATEGORIES = [
     ("PARTNET", "41-7100-01", "4171-01", "รายได้ศูนย์บริการทั่วไป-อะไหล่(เงินสด)"),
@@ -199,9 +212,10 @@ def group_bills(jobs):
 
 # ───────────────────────── โหมดอะไหล่ (parts) ─────────────────────────
 def detect_mode(path):
-    """ดูจากหัวคอลัมน์ว่าเป็นไฟล์ศูนย์บริการ (service) หรืออะไหล่ (parts)"""
+    """ดูจากหัวคอลัมน์ว่าเป็นไฟล์ศูนย์บริการ / อะไหล่ขายสด / ซื้อเงินเชื่อ"""
     import xlrd
     hdr = [str(h).strip() for h in xlrd.open_workbook(path).sheet_by_index(0).row_values(0)]
+    if "INVNO" in hdr and ("RECVNO" in hdr or "APNAME" in hdr): return "purchase"
     if "ยอดสุทธิ" in hdr or "เลขที่ใบกำกับ" in hdr: return "parts"
     if "SERVNET" in hdr or "JOBNO" in hdr:          return "service"
     return "service"
@@ -237,6 +251,74 @@ def group_parts_bills(invs):
                                 "des":PARTS_STKDES, "amt":net}],
                       "invoices":grp, "sub":net, "vat":vat, "total":r2(net+vat),
                       "njobs":len(grp)})
+    return bills
+
+# ───────────────────────── โหมดซื้อเงินเชื่อ-อะไหล่ (purchase) ─────────────────────────
+_VENDOR_CACHE = None
+def _norm(s): return "".join(str(s).split()).replace("\xa0","")
+
+def _load_vendors():
+    """โหลดผู้ขายจาก APMAS + นับว่าแต่ละรหัสถูกใช้ในเอกสาร RS กี่ครั้ง (ไว้ตัดสินกรณีชื่อซ้ำ)"""
+    global _VENDOR_CACHE
+    if _VENDOR_CACHE is not None: return _VENDOR_CACHE
+    from collections import Counter
+    ap = DBF(os.path.join(DB_DIR, "APTRN.DBF"))
+    rs_use = Counter(ap.get(i).get("SUPCOD") for i in range(len(ap))
+                     if str(ap.get(i).get("DOCNUM","")).startswith(PUR_PREFIX))
+    _VENDOR_CACHE = []
+    am = DBF(os.path.join(DB_DIR, "APMAS.DBF"))
+    for i in range(len(am)):
+        r = am.get(i)
+        if not r.get("SUPCOD"): continue
+        _VENDOR_CACHE.append((_norm(r.get("SUPNAM")), {
+            "SUPCOD":r.get("SUPCOD"), "SUPNAM":(r.get("SUPNAM") or "").strip(),
+            "TAXID":(r.get("TAXID") or "").strip(), "APACC":(r.get("ACCNUM") or "").strip(),
+            "ORGNUM":r.get("ORGNUM") or 0, "STATUS":r.get("STATUS"),
+            "RSUSE":rs_use.get(r.get("SUPCOD"),0)}))
+    return _VENDOR_CACHE
+
+def vendor_by_code(code):
+    for nm, info in _load_vendors():
+        if info["SUPCOD"] == code: return info
+    return None
+
+def vendor_lookup(apname):
+    """ผู้ขายของรายงานซื้อ = P078 (กำหนดไว้) ; ถ้าหาไม่เจอค่อย match จากชื่อ
+       (เผื่อชื่อซ้ำ เลือกตัวที่เอกสาร RS ใช้บ่อยสุด / เลขภาษี 13 หลัก / active)"""
+    fixed = vendor_by_code(PUR_SUPCOD)
+    if fixed: return fixed
+    key = _norm(apname)
+    cands = [info for nm, info in _load_vendors() if nm and (nm in key or key in nm)]
+    if not cands: return None
+    cands.sort(key=lambda v: (v["RSUSE"], len(v["TAXID"])==13, v["STATUS"]=="A"), reverse=True)
+    return cands[0]
+
+def read_purchase_receipts(path):
+    import xlrd
+    sh = xlrd.open_workbook(path).sheet_by_index(0)
+    hdr = {str(n).strip():i for i,n in enumerate(sh.row_values(0))}
+    g = lambda r,c: sh.cell_value(r, hdr[c]) if c in hdr else ""
+    out = []
+    for r in range(1, sh.nrows):
+        inv = str(g(r,"INVNO")).strip()
+        if not inv: continue
+        idate = g(r,"INVDATE")
+        if isinstance(idate,(int,float)): idate = excel_serial_to_date(idate)
+        else: idate = datetime.date.fromisoformat(str(idate)[:10])
+        out.append({"INVNO":inv, "INVDATE":idate, "APNAME":str(g(r,"APNAME")).strip(),
+                    "NET":r2(g(r,"NETAMT")), "VAT":r2(g(r,"VATAMT")), "RECVNO":str(g(r,"RECVNO")).strip()})
+    return out
+
+def group_purchase_bills(rows):
+    """แต่ละแถว = 1 บิล (ไม่รวม)"""
+    bills = []
+    for v in rows:
+        net, vat = v["NET"], v["VAT"]
+        ven = vendor_lookup(v["APNAME"]) or {}
+        bills.append({"mode":"purchase", "date":v["INVDATE"], "youref":v["INVNO"],
+                      "invno":v["INVNO"], "apname":v["APNAME"], "vendor":ven,
+                      "lines":[{"stk":PUR_STKCOD, "acc":PUR_INV_ACC, "des":PUR_STKDES, "amt":net}],
+                      "sub":net, "vat":vat, "total":r2(net+vat), "njobs":1})
     return bills
 
 # ───────────────────────── record builders ─────────────────────────
@@ -380,34 +462,89 @@ def build_parts_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
 
     return {"ARTRN":[artrn],"GLJNL":gljnl,"GLJNLIT":git,"ISVAT":isvat,"STCRD":stcrd}
 
+def build_purchase_all(bill, docnum, t_aptrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
+    """ซื้อเงินเชื่อ-อะไหล่ (RS): 1 ใบ/แถว, แยก VAT, Dr สินค้า+ภาษีซื้อ Cr เจ้าหนี้
+       (ไม่แตะยอดสต็อกสะสม — ให้ Express คำนวณต้นทุน/ยอดสินค้าใหม่ภายหลัง)"""
+    d, net, vat, tot = bill["date"], bill["sub"], bill["vat"], bill["total"]
+    inv = bill["invno"]; ven = bill["vendor"]
+    supcod = ven.get("SUPCOD",""); apacc = ven.get("APACC","") or "2123-02"
+    desc = f"{PUR_DESC}  " + bill["apname"].replace(" ", "\xa0")   # "ซื้อเชื่อจาก  " + ชื่อ(nbsp)
+    due = d + datetime.timedelta(days=PUR_PAYTRM)
+    DEP = PUR_DEPCOD; vatprd = d.replace(day=1)
+
+    aptrn = t_aptrn.build_record({
+        "RECTYP":"3","DOCNUM":docnum,"DOCDAT":D(d),"REFNUM":inv,"VATPRD":D(vatprd),
+        "DEPCOD":DEP,"FLGVAT":"2","SUPCOD":supcod,"PAYTRM":PUR_PAYTRM,"DUEDAT":D(due),
+        "BILNUM":"~","NXTSEQ":"  1","AMOUNT":net,"DISCAMT":0.0,"AFTDISC":net,"ADVAMT":0.0,
+        "TOTAL":net,"AMTRAT0":0.0,"VATRAT":VAT_RATE,"VATAMT":vat,"NETAMT":tot,"NETVAL":net,
+        "PAYAMT":tot,"REMAMT":0.0,"CMPLAPP":"Y","DOCSTAT":"N","CSHPAY":0.0,"CHQPAY":0.0,
+        "VATDAT":D(d),"SRV_VATTYP":"1","PVATPRORAT":"-","USERID":USER_ID,"CHGDAT":D(TODAY),
+        "ORGNUM":ven.get("ORGNUM",0)})
+
+    gljnl = [t_gljnl.build_record({
+        "JNLTYP":PUR_JNLTYP,"VOUDAT":D(d),"VOUCHER":docnum,"DESCRP":desc,
+        "TRNSTAT":"P","DOCSTAT":"N","CREBY":USER_ID,"CREDAT":D(TODAY),
+        "USERID":USER_ID,"CHGDAT":D(TODAY)}) for _ in range(2)]
+
+    def gl(acc, typ, amt, seqit, dep):
+        return t_gljit.build_record({"VOUCHER":docnum,"SEQIT":seqit,"VOUDAT":D(d),"ACCNUM":acc,
+            "DEPCOD":dep,"DESCRP":desc,"TRNTYP":typ,"AMOUNT":amt,
+            "CHGDAT":D(TODAY),"CHGTIM":CHGTIM,"CHGACCFROM":PUR_ACCFROM})
+    git = []
+    for _ in range(2):                                   # 2 ชุดเหมือนกัน
+        git += [gl(PUR_INV_ACC,"0",net,    " 1",DEP),    # Dr สินค้าคงเหลือ
+                gl(PUR_VATIN,  "0",vat,    " 3",DEP),    # Dr ภาษีซื้อ
+                gl(apacc,      "1",tot,    " 6","")]      # Cr เจ้าหนี้
+
+    isvat = [t_isvat.build_record({
+        "VATREC":"P","RECTYP":"3","VATPRD":D(vatprd),"VATDAT":D(d),"DOCDAT":D(d),
+        "DOCNUM":docnum,"REFNUM":inv,"DEPCOD":DEP,"DESCRP":(ven.get("SUPNAM","") or bill["apname"]).replace(" ","\xa0"),
+        "AMT01":net,"VAT01":vat,"AMT02":0.0,"VAT02":0.0,"AMTRAT0":0.0,
+        "SELF_ADDED":"N","HAD_MODIFY":"N","DOCSTAT":"N",
+        "TAXID":ven.get("TAXID","") or "0000000000000","ORGNUM":ven.get("ORGNUM",0)})]
+
+    # STCRD: รับเข้าสต็อก (cost=net) — ยอดสะสมปล่อยให้ Express คำนวณใหม่
+    stcrd = [t_stcrd.build_record({
+        "STKCOD":PUR_STKCOD,"LOCCOD":"01","DOCNUM":docnum,"SEQNUM":"  1","DOCDAT":D(d),
+        "REFNUM":inv,"DEPCOD":DEP,"POSOPR":"0","PEOPLE":supcod,"TRNQTY":1.0,"TQUCOD":"ชน",
+        "TFACTOR":1.0,"UNITPR":net,"DISCAMT":0.0,"TRNVAL":net,"XTRNQTY":1.0,"XUNITPR":net,
+        "XTRNVAL":net,"NETVAL":net,"STKDES":PUR_STKDES})]
+
+    return {"APTRN":[aptrn],"GLJNL":gljnl,"GLJNLIT":git,"ISVAT":isvat,"STCRD":stcrd}
+
 def build_bill(bill, docnum, t):
     """เลือก builder ตามโหมดของบิล"""
-    fn = build_parts_all if bill.get("mode")=="parts" else build_all
+    m = bill.get("mode")
+    if m=="purchase":
+        return build_purchase_all(bill, docnum, t["APTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
+    fn = build_parts_all if m=="parts" else build_all
     return fn(bill, docnum, t["ARTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
 
 def load_source(xls):
     """อ่านไฟล์ -> (mode, bills)"""
     mode = detect_mode(xls)
-    if mode=="parts": return mode, group_parts_bills(read_parts_invoices(xls))
+    if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls))
+    if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls))
     return mode, group_bills(read_xls_jobs(xls))
 
 # ───────────────────────── running number ─────────────────────────
 def prefix_for(bills):
-    return PARTS_PREFIX if bills and bills[0].get("mode")=="parts" else DOC_PREFIX
+    m = bills[0].get("mode") if bills else None
+    return {"parts":PARTS_PREFIX, "purchase":PUR_PREFIX}.get(m, DOC_PREFIX)
 
-def next_numbers(t_artrn, bills, prefix=None):
-    """กำหนดเลขที่บิลต่อจากที่มีอยู่ใน ARTRN (ต่อ ปีเดือน)"""
+def next_numbers(t_hdr, bills, prefix=None, dedup_field="YOUREF"):
+    """กำหนดเลขที่บิลต่อจากที่มีอยู่ในตารางหัว (ARTRN/APTRN) ต่อ ปีเดือน"""
     prefix = prefix or prefix_for(bills)
-    used = {}; existing_youref = set()
-    for i in range(len(t_artrn)):
-        dn = t_artrn.get(i).get("DOCNUM") or ""
+    used = {}; existing = set()
+    for i in range(len(t_hdr)):
+        dn = t_hdr.get(i).get("DOCNUM") or ""
         if dn.startswith(prefix) and "/" in dn:
             ym, _, nn = dn[len(prefix):].partition("/")
             if nn.isdigit(): used[ym] = max(used.get(ym,0), int(nn))
-            existing_youref.add(t_artrn.get(i).get("YOUREF"))
+            existing.add(t_hdr.get(i).get(dedup_field))
     out = []
     for b in bills:
-        if b["youref"] in existing_youref:
+        if b["youref"] in existing:
             out.append((b, None)); continue          # มีแล้ว -> ข้าม
         ym = yymm(b["date"])
         used[ym] = used.get(ym, 0) + 1
@@ -417,11 +554,13 @@ def next_numbers(t_artrn, bills, prefix=None):
 # ───────────────────────── commands ─────────────────────────
 def open_tables():
     return {n: DBF(os.path.join(DB_DIR, n+".DBF"))
-            for n in ["ARTRN","GLJNL","GLJNLIT","ISVAT","STCRD"]}
+            for n in ["ARTRN","APTRN","GLJNL","GLJNLIT","ISVAT","STCRD"]}
 
 def count_items(path):
-    """นับจำนวนรายการในไฟล์ (งาน หรือ ใบกำกับ) ตามโหมด"""
-    return len(read_parts_invoices(path) if detect_mode(path)=="parts" else read_xls_jobs(path))
+    """นับจำนวนรายการในไฟล์ตามโหมด"""
+    m = detect_mode(path)
+    rd = {"parts":read_parts_invoices, "purchase":read_purchase_receipts}.get(m, read_xls_jobs)
+    return len(rd(path))
 
 def pick_xls(arg):
     if arg: return arg
@@ -432,10 +571,12 @@ def pick_xls(arg):
 def cmd_preview(args, commit=False):
     xls = pick_xls(args.xls)
     mode, bills = load_source(xls)
-    unit = "ใบกำกับ" if mode=="parts" else "งาน"
+    unit = {"parts":"ใบกำกับ","purchase":"ใบรับ"}.get(mode,"งาน")
     nitems = sum(b["njobs"] for b in bills)
     t = open_tables()
-    plan = next_numbers(t["ARTRN"], bills)
+    hdr_tbl = "APTRN" if mode=="purchase" else "ARTRN"
+    dedup = "REFNUM" if mode=="purchase" else "YOUREF"
+    plan = next_numbers(t[hdr_tbl], bills, dedup_field=dedup)
 
     print(f"ไฟล์ต้นทาง : {os.path.basename(xls)}  [โหมด {mode}]  ({nitems} {unit} -> {len(bills)} บิล)")
     print("="*64)
@@ -481,10 +622,12 @@ def cmd_preview(args, commit=False):
 
     # อัปเดตเลขรันใน ISRUN (เฉพาะโหมด service ที่ ISRUN เก็บเป็นรูปแบบ ปีเดือน+รัน)
     if mode=="service": update_isrun(new)
-    else: print("  (โหมดอะไหล่: เลขรันคำนวณต่อจากเอกสารเดิมใน ARTRN — ไม่แก้ ISRUN)")
+    else: print("  (เลขรันคำนวณต่อจากเอกสารเดิม — ไม่แก้ ISRUN)")
     print("\n✓ เขียนข้อมูลเรียบร้อย")
     print("‼️  ขั้นต่อไปใน Express: เริ่มระบบ -> จัดการแฟ้มข้อมูล ->")
     print("    1) จัดเรียงดัชนีใหม่ (Reindex)   2) คำนวณยอดบัญชี/ยอดยกมาใหม่")
+    if mode=="purchase":
+        print("    3) คำนวณต้นทุน/ยอดสินค้าคงเหลือใหม่   4) คำนวณยอดเจ้าหนี้ใหม่")
 
 def update_isrun(new):
     path = os.path.join(DB_DIR, "ISRUN.DBF")
