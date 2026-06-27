@@ -72,6 +72,22 @@ def config_status():
             "mode": xls_mode(XLS_FILE) if ok else ""}
 
 # ───────── folder/file browser ─────────
+def list_drives():
+    """รายชื่อไดรฟ์ที่มี (Windows: C:\\ D:\\ Z:\\ ...; Mac: / และ /Volumes/*)"""
+    out = []
+    if os.name == "nt":
+        import string
+        for c in string.ascii_uppercase:
+            d = f"{c}:\\"
+            if os.path.exists(d): out.append(d)
+    else:
+        out.append("/")
+        vol = "/Volumes"
+        if os.path.isdir(vol):
+            for n in sorted(os.listdir(vol)):
+                if os.path.isdir(os.path.join(vol, n)): out.append(os.path.join(vol, n))
+    return out
+
 def listdir(path, want_files=False):
     path = os.path.abspath(os.path.expanduser(path or os.path.expanduser("~")))
     if not os.path.isdir(path): path = os.path.expanduser("~")
@@ -96,7 +112,7 @@ def listdir(path, want_files=False):
                           "jobs": xls_jobs(e.path) if count_jobs else None})
     parent = os.path.dirname(path)
     return {"path": path, "parent": (parent if parent != path else None),
-            "dirs": dirs, "files": files,
+            "dirs": dirs, "files": files, "drives": list_drives(),
             "self_dbf": "ARTRN.DBF" in {n.upper() for n in (os.listdir(path) if os.path.isdir(path) else [])},
             "home": os.path.expanduser("~")}
 
@@ -381,6 +397,7 @@ async function browse(path){
   curPath=d.path;
   $('#mpath').textContent='📍 '+d.path + (d.self_dbf&&!isFile?'   ✓ โฟลเดอร์นี้มี DBF':'');
   let sh=`<span class="chip" onclick='browse(${JSON.stringify(d.home)})'>🏠 Home</span>`;
+  (d.drives||[]).forEach(dr=>sh+=`<span class="chip" onclick='browse(${JSON.stringify(dr)})'>💾 ${dr}</span>`);
   if(d.parent)sh+=`<span class="chip" onclick='browse(${JSON.stringify(d.parent)})'>⬆️ ขึ้นบน</span>`;
   $('#mshort').innerHTML=sh;
   let h='';
