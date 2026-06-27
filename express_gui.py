@@ -457,13 +457,15 @@ def free_port(host, want=0):
 
 def main():
     ap = argparse.ArgumentParser(description="โปรแกรมนำเข้าข้อมูล -> Express")
-    ap.add_argument("--lan", action="store_true", help="ให้เครื่องอื่นในวง LAN เข้าใช้งานได้")
-    ap.add_argument("--port", type=int, default=0, help="พอร์ต (ค่าเริ่มต้น: LAN=8765, ปกติ=สุ่ม)")
+    ap.add_argument("--local", action="store_true", help="เปิดเฉพาะเครื่องนี้ (ไม่แชร์ LAN)")
+    ap.add_argument("--lan", action="store_true", help="(ค่าเริ่มต้นอยู่แล้ว) แชร์ในวง LAN")
+    ap.add_argument("--port", type=int, default=0, help="พอร์ต (ค่าเริ่มต้น: แชร์ LAN=8765, --local=สุ่ม)")
     a = ap.parse_args()
     load_config()
 
-    host = "0.0.0.0" if a.lan else "127.0.0.1"
-    port = a.port or (8765 if a.lan else 0)
+    lan = not a.local                       # ค่าเริ่มต้น = แชร์ LAN
+    host = "127.0.0.1" if a.local else "0.0.0.0"
+    port = a.port or (0 if a.local else 8765)
     port = free_port(host, port)
     httpd = ThreadingHTTPServer((host, port), H)
     local_url = f"http://127.0.0.1:{port}/"
@@ -471,10 +473,10 @@ def main():
     print("="*60)
     print("  โปรแกรมนำเข้าข้อมูลขายเงินสด → Express")
     print(f"  เครื่องนี้เปิดที่ : {local_url}")
-    if a.lan:
-        print(f"  เครื่องอื่นใน LAN : http://{lan_ip()}:{port}/")
-        print("  ⚠️  โหมดแชร์ LAN: ใครก็ตามในวงเน็ตเดียวกันเข้าหน้านี้และกดบันทึกได้")
-        print("      - ใช้เฉพาะในออฟฟิศที่ไว้ใจ และครั้งแรกต้องกด Allow ที่ firewall")
+    if lan:
+        print(f"  เครื่องอื่นใน LAN : http://{lan_ip()}:{port}/   <- ส่ง URL นี้ให้เครื่องอื่น")
+        print("  ⚠️  แชร์ LAN (ค่าเริ่มต้น): ใครในวงเน็ตเดียวกันเข้าหน้านี้และกดบันทึกได้")
+        print("      ครั้งแรก Windows จะถาม Allow firewall ต้องกดอนุญาต  (อยากปิดแชร์: ใส่ --local)")
     print(f"  ฐานข้อมูล : {EX.DB_DIR}")
     print(f"  ไฟล์ xls  : {XLS_FILE or '(ยังไม่เลือก)'}")
     print("  (ปิดหน้าต่างนี้ = ปิดโปรแกรม)   กด Ctrl+C เพื่อหยุด")

@@ -30,14 +30,20 @@ jobs:
       - name: Build ExpressImport.exe
         run: pyinstaller --onefile --console --name ExpressImport --hidden-import xlrd express_gui.py
 
+      - name: Create launchers (แชร์ LAN เป็นค่าเริ่มต้น + เฉพาะเครื่องนี้)
+        shell: pwsh
+        run: |
+          "@echo off`r`ncd /d `"%~dp0`"`r`nExpressImport.exe`r`npause" | Set-Content dist/เปิดโปรแกรม-แชร์LAN.bat -Encoding utf8
+          "@echo off`r`ncd /d `"%~dp0`"`r`nExpressImport.exe --local`r`npause" | Set-Content dist/เปิดโปรแกรม-เฉพาะเครื่องนี้.bat -Encoding utf8
+
       - name: Upload artifact (ดาวน์โหลดได้จากหน้า Actions)
         uses: actions/upload-artifact@v4
         with:
           name: ExpressImport-windows
-          path: dist/ExpressImport.exe
+          path: dist/*
 
       - name: Attach to Release (เฉพาะตอนติด tag v*)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/ExpressImport.exe
+          files: dist/*
