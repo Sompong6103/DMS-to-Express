@@ -21,6 +21,13 @@ try:                       # ให้ console บน Windows แสดงภา
 except Exception:
     pass
 
+if os.name == "nt":        # ปิด dialog "There is no disk in the drive" ตอนไล่เช็คไดรฟ์/card reader
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x8000)  # SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
+    except Exception:
+        pass
+
 CONFIG_FILE = os.path.join(HERE, "express_config.json")
 UPLOAD_DIR  = os.path.join(HERE, "uploads")     # ไฟล์ xls ที่ client อัปโหลดมา
 REQUIRED = ["ARTRN", "GLJNL", "GLJNLIT", "ISVAT", "STCRD", "ISRUN"]   # ตารางที่ต้องมี
@@ -73,13 +80,25 @@ def config_status():
 
 # ───────── folder/file browser ─────────
 def list_drives():
-    """รายชื่อไดรฟ์ที่มี (Windows: C:\\ D:\\ Z:\\ ...; Mac: / และ /Volumes/*)"""
+    """รายชื่อไดรฟ์ที่มี (Windows: ใช้ GetLogicalDrives เลี่ยงการแตะ media/card reader)"""
     out = []
     if os.name == "nt":
         import string
-        for c in string.ascii_uppercase:
-            d = f"{c}:\\"
-            if os.path.exists(d): out.append(d)
+        bitmask = 0
+        try:
+            import ctypes
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        except Exception:
+            bitmask = 0
+        if bitmask:
+            for i, c in enumerate(string.ascii_uppercase):
+                if bitmask & (1 << i): out.append(f"{c}:\\")
+        else:                                   # fallback (เผื่อเรียก API ไม่ได้)
+            for c in string.ascii_uppercase:
+                p = f"{c}:\\"
+                try:
+                    if os.path.exists(p): out.append(p)
+                except Exception: pass
     else:
         out.append("/")
         vol = "/Volumes"
@@ -94,7 +113,7 @@ def listdir(path, want_files=False):
     dirs, files = [], []
     try:
         entries = sorted(os.scandir(path), key=lambda x: x.name.lower())
-    except PermissionError:
+    except Exception:
         entries = []
     XEXT = (".xls", ".xlsx")
     xls_here = [e for e in entries if e.is_file() and e.name.lower().endswith(XEXT)]
