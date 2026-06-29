@@ -68,10 +68,14 @@ def pur_cfg(branch): return PUR_BRANCHES.get(branch or PUR_DEFAULT_BRANCH, PUR_B
 # ───── โหมดจ่ายเงินสดย่อย (DP = จ่ายคชจ.จากเงินทดรองจ่ายย่อย) ─────
 PETTY_REFNUM = ""          # ใบเบิก (VR...) เว้นว่างไว้ (ระบุภายหลังได้)
 
-# ───── โหมดโอนเงินระหว่างธนาคาร (BT) ─────
+# ───── โหมดโอนเงินระหว่างธนาคาร (BT) : 2 สาขา ─────
 BT_JNLTYP  = "00"          # สมุดรายวันทั่วไป
-BT_FEE_ACC = "5360-04"     # ค่าธรรมเนียมธนาคาร (สุราษ)
-BT_FEE_DEP = ""            # แผนกของบรรทัดค่าธรรมเนียม
+# ต่างกันแค่บัญชีค่าธรรมเนียม (บัญชีธนาคาร resolve จาก BKMAS, เลขที่บิลมาจากไฟล์)
+BT_BRANCHES = {
+    "chumphon": {"name":"ชุมพร", "fee_acc":"5353-01", "fee_dep":""},
+    "surat":    {"name":"สุราษ", "fee_acc":"5360-04", "fee_dep":""},
+}
+def bt_cfg(branch): return BT_BRANCHES.get(branch or "chumphon", BT_BRANCHES["chumphon"])
 
 # ───── โหมดขายเงินสด-ศูนย์บริการ (HC) : 2 สาขา ─────
 # cats: (คอลัมน์ xls, รหัสสินค้าบริการ STKCOD, คำอธิบาย) — บัญชีรายได้ดึงจาก DB อัตโนมัติ
@@ -453,11 +457,12 @@ def read_bt(path):
                     "DETAIL":str(g("รายละเอียด") or "").strip(), "MEMO":str(g("คำอธิบาย") or "").strip()})
     return out
 
-def group_bt_bills(rows):
+def group_bt_bills(rows, branch=None):
     """แต่ละแถว = 1 เอกสารโอนเงิน (ใช้เลขที่เอกสารจากไฟล์)"""
     bills = []
     for v in rows:
-        bills.append({"mode":"bt", "date":v["DATE"], "youref":v["DOCNUM"], "docnum":v["DOCNUM"],
+        bills.append({"mode":"bt", "branch": branch or "chumphon",
+                      "date":v["DATE"], "youref":v["DOCNUM"], "docnum":v["DOCNUM"],
                       "src":v["SRC"], "dst":v["DST"], "debit":v["DEBIT"], "fee":v["FEE"],
                       "deposit":v["DEPOSIT"], "detail":v["DETAIL"], "memo":v["MEMO"],
                       "lines":[{"stk":v["DST"], "des":"เข้า "+v["DST"], "amt":v["DEPOSIT"]},
@@ -683,6 +688,7 @@ def build_bt_all(bill, docnum, t_gljnl, t_gljit):
     """โอนเงินระหว่างธนาคาร (BT): GLJNL + GLJNLIT 3 บรรทัด
        Dr ปลายทาง(ฝากเข้า) SEQIT' 1' + Dr ค่าธรรมเนียม SEQIT' 2' + Cr ต้นทาง(หักบัญชี) SEQIT' 5'"""
     d = bill["date"]; deposit, fee, debit = bill["deposit"], bill["fee"], bill["debit"]
+    cfg = bt_cfg(bill.get("branch"))
     src_acc, src_nm = resolve_bank(bill["src"])
     dst_acc, dst_nm = resolve_bank(bill["dst"])
     desc = bill["detail"] or f"โอนมาจาก {src_nm or bill['src']} ไปเข้า {dst_nm or bill['dst']} ธรรมเนียม {fee:,.2f}"
@@ -695,9 +701,9 @@ def build_bt_all(bill, docnum, t_gljnl, t_gljit):
             "DEPCOD":dep,"DESCRP":desc,"TRNTYP":typ,"AMOUNT":amt,
             "CHGDAT":D(TODAY),"CHGTIM":CHGTIM})
     git = [
-        gl(dst_acc or "", "0", deposit, " 1"),            # Dr ปลายทาง (ฝากเข้า)
-        gl(BT_FEE_ACC,    "0", fee,     " 2", BT_FEE_DEP),# Dr ค่าธรรมเนียม
-        gl(src_acc or "", "1", debit,   " 5"),            # Cr ต้นทาง (หักบัญชี)
+        gl(dst_acc or "", "0", deposit, " 1"),                         # Dr ปลายทาง (ฝากเข้า)
+        gl(cfg["fee_acc"], "0", fee,    " 2", cfg["fee_dep"]),         # Dr ค่าธรรมเนียม (ตามสาขา)
+        gl(src_acc or "", "1", debit,   " 5"),                         # Cr ต้นทาง (หักบัญชี)
     ]
     return {"GLJNL":gljnl, "GLJNLIT":git}
 
@@ -713,7 +719,7 @@ def build_bill(bill, docnum, t):
 def load_source(xls, branch=None):
     """อ่านไฟล์ -> (mode, bills) ; branch ใช้เฉพาะโหมดซื้อ (ชุมพร/สุราษ)"""
     mode = detect_mode(xls)
-    if mode=="bt":       return mode, group_bt_bills(read_bt(xls))
+    if mode=="bt":       return mode, group_bt_bills(read_bt(xls), branch)
     if mode=="petty":    return mode, group_petty_bills(read_petty(xls))
     if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls), branch)
     if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls), branch)
