@@ -238,6 +238,10 @@ def verify_bt(xls, branch=None):
         if abs(dr-cr)>0.01: bad+=1
     print("ตรวจสมดุล GL: " + ("✓ สมดุลทุกใบ" if bad==0 else f"✗ {bad} ใบไม่สมดุล"))
     print(f"ค่าธรรมเนียมลงบัญชี: {EX.bt_cfg(branch)['fee_acc']} (แผนก {EX.bt_cfg(branch)['fee_dep'] or 'ว่าง'})")
+    if bills:
+        b0 = bills[0]
+        gj = EX.decode_built(t["GLJNL"], EX.build_bt_all(b0, b0["docnum"], t["GLJNL"], t["GLJNLIT"])["GLJNL"][0])
+        print(f"ตัวอย่างคำอธิบาย: {gj['DESCRP']!r}")
     print("รหัสบัญชีธนาคาร -> บัญชี GL (ดึงจาก BKMAS ของ DB ที่เลือก):")
     for c, acc in sorted(codes.items()):
         print(f"   {c:4} -> {acc or '⚠️ หาไม่เจอใน DB นี้ (เลือก DB ให้ถูก/ตรวจ BKMAS)'}")

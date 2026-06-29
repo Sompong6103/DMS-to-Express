@@ -691,7 +691,8 @@ def build_bt_all(bill, docnum, t_gljnl, t_gljit):
     cfg = bt_cfg(bill.get("branch"))
     src_acc, src_nm = resolve_bank(bill["src"])
     dst_acc, dst_nm = resolve_bank(bill["dst"])
-    desc = bill["detail"] or f"โอนมาจาก {src_nm or bill['src']} ไปเข้า {dst_nm or bill['dst']} ธรรมเนียม {fee:,.2f}"
+    # คำอธิบาย: "โอนมาจาก {ต้นทาง} ไปเข้า {ปลายทาง} ธรรมเนียม {ค่าธรรมเนียม}"
+    desc = f"โอนมาจาก {src_nm or bill['src']} ไปเข้า {dst_nm or bill['dst']} ธรรมเนียม {fee:,.2f}"
     gljnl = [t_gljnl.build_record({
         "JNLTYP":BT_JNLTYP,"VOUDAT":D(d),"VOUCHER":docnum,"DESCRP":desc,
         "TRNSTAT":"P","DOCSTAT":"N","CREBY":USER_ID,"CREDAT":D(TODAY),
