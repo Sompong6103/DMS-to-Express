@@ -219,8 +219,33 @@ def verify_generic(xls, branch=None):
             print(f"   {l['stk']:12} {l['des'][:34]:34} -> {inc or '⚠️ หาไม่เจอใน DB นี้ (เลือก DB ให้ถูกสาขา)'}")
     print("\n✓ ดูรายละเอียดแต่ละบิลที่ปุ่มดูตัวอย่าง")
 
+def verify_bt(xls):
+    mode, bills = EX.load_source(xls)
+    t = EX.open_tables()
+    have = {t["GLJNL"].get(i).get("VOUCHER") for i in range(len(t["GLJNL"]))}
+    new = [b for b in bills if b["docnum"] not in have]
+    print(f"โหมดโอนเงินระหว่างธนาคาร (BT): {len(bills)} รายการ (ใหม่ {len(new)})")
+    bad=0; codes={}
+    for b in bills:
+        codes[b["src"]] = EX.resolve_bank(b["src"])[0]
+        codes[b["dst"]] = EX.resolve_bank(b["dst"])[0]
+        recs = EX.build_bt_all(b, b["docnum"], t["GLJNL"], t["GLJNLIT"])
+        dr=cr=0
+        for m in recs["GLJNLIT"]:
+            x=EX.decode_built(t["GLJNLIT"], m)
+            if x["TRNTYP"]=="0": dr+=x["AMOUNT"]
+            else: cr+=x["AMOUNT"]
+        if abs(dr-cr)>0.01: bad+=1
+    print("ตรวจสมดุล GL: " + ("✓ สมดุลทุกใบ" if bad==0 else f"✗ {bad} ใบไม่สมดุล"))
+    print(f"ค่าธรรมเนียมลงบัญชี: {EX.BT_FEE_ACC}")
+    print("รหัสบัญชีธนาคาร -> บัญชี GL (ดึงจาก BKMAS ของ DB ที่เลือก):")
+    for c, acc in sorted(codes.items()):
+        print(f"   {c:4} -> {acc or '⚠️ หาไม่เจอใน DB นี้ (เลือก DB ให้ถูก/ตรวจ BKMAS)'}")
+    print("\n✓ ดูรายละเอียดที่ปุ่มดูตัวอย่าง")
+
 def verify_text(xls, branch=None):
     m = EX.detect_mode(xls)
+    if m=="bt":       return capture(verify_bt, xls)
     if m=="petty":    return capture(verify_petty, xls)
     if m=="purchase": return capture(verify_purchase, xls, branch)
     if branch=="surat":                                  # ไม่มีตัวอย่างสุราษให้เทียบ byte
@@ -283,6 +308,7 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
   <div class="tab" id="tab-parts">🔩 ขายสด-อะไหล่ (HO)</div>
   <div class="tab" id="tab-purchase">📦 ซื้อเชื่อ-อะไหล่ (RS)</div>
   <div class="tab" id="tab-petty">💵 จ่ายเงินสดย่อย (DP)</div>
+  <div class="tab" id="tab-bt">🏦 โอนเงินระหว่างธนาคาร (BT)</div>
 </div>
 
 <div class="card">
@@ -364,13 +390,14 @@ async function afetch(url,opts){
   if(r.status===401){ TOKEN=''; localStorage.removeItem('exp_token'); showLogin(); throw new Error('ต้องเข้าสู่ระบบ'); }
   return r;
 }
-const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'},purchase:{name:'ซื้ออะไหล่',unit:'ใบรับ'},petty:{name:'จ่ายเงินสดย่อย',unit:'รายการ'}};
+const MODES={service:{name:'ศูนย์บริการ',unit:'งาน'},parts:{name:'อะไหล่',unit:'ใบกำกับ'},purchase:{name:'ซื้ออะไหล่',unit:'ใบรับ'},petty:{name:'จ่ายเงินสดย่อย',unit:'รายการ'},bt:{name:'โอนเงินธนาคาร',unit:'รายการ'}};
 function setMode(m){
   $('#tab-service').classList.toggle('on',m==='service');
   $('#tab-parts').classList.toggle('on',m==='parts');
   $('#tab-purchase').classList.toggle('on',m==='purchase');
   $('#tab-petty').classList.toggle('on',m==='petty');
-  $('#branchrow').style.display = (m && m!=='petty') ? 'flex' : 'none';
+  $('#tab-bt').classList.toggle('on',m==='bt');
+  $('#branchrow').style.display = (m==='service'||m==='parts'||m==='purchase') ? 'flex' : 'none';
 }
 function branchVal(){ return $('#branch') ? $('#branch').value : 'chumphon'; }
 function fmt(n){return n.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}

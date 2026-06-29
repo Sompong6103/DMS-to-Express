@@ -68,6 +68,11 @@ def pur_cfg(branch): return PUR_BRANCHES.get(branch or PUR_DEFAULT_BRANCH, PUR_B
 # ───── โหมดจ่ายเงินสดย่อย (DP = จ่ายคชจ.จากเงินทดรองจ่ายย่อย) ─────
 PETTY_REFNUM = ""          # ใบเบิก (VR...) เว้นว่างไว้ (ระบุภายหลังได้)
 
+# ───── โหมดโอนเงินระหว่างธนาคาร (BT) ─────
+BT_JNLTYP  = "00"          # สมุดรายวันทั่วไป
+BT_FEE_ACC = "5360-04"     # ค่าธรรมเนียมธนาคาร (สุราษ)
+BT_FEE_DEP = ""            # แผนกของบรรทัดค่าธรรมเนียม
+
 # ───── โหมดขายเงินสด-ศูนย์บริการ (HC) : 2 สาขา ─────
 # cats: (คอลัมน์ xls, รหัสสินค้าบริการ STKCOD, คำอธิบาย) — บัญชีรายได้ดึงจาก DB อัตโนมัติ
 SERVICE_BRANCHES = {
@@ -199,6 +204,29 @@ def yymm(d):
 
 def r2(x): return round(float(x) + 1e-9, 2)
 
+def xlsx_date(dv):
+    """แปลงวันที่จาก xlsx -> ค.ศ. (รองรับ พ.ศ.เต็ม 2569, พ.ศ.ย่อ 19xx, และ ค.ศ.)"""
+    if not hasattr(dv, "year"): return TODAY
+    y = dv.year
+    if y >= 2400:   y -= 543              # พ.ศ.เต็ม -> ค.ศ.
+    elif y < 2000:  y = 1957 + (y % 100)  # พ.ศ.ย่อ เก็บเป็น 19xx -> ค.ศ.
+    return datetime.date(y, dv.month, dv.day)
+
+_bank_cache = {}
+def resolve_bank(code):
+    """รหัสบัญชีธนาคาร (BKMAS.BNKACC) -> (GL ACCNUM, ชื่อย่อ) จาก DB ที่เลือก"""
+    if DB_DIR not in _bank_cache:
+        m = {}
+        try:
+            bk = DBF(os.path.join(DB_DIR, "BKMAS.DBF"))
+            for i in range(len(bk)):
+                r = bk.get(i)
+                m[str(r.get("BNKACC"))] = (r.get("ACCNUM"), r.get("SHORTNAM") or r.get("BNKNAM"))
+        except Exception:
+            pass
+        _bank_cache[DB_DIR] = m
+    return _bank_cache[DB_DIR].get(code, (None, None))
+
 _income_cache = {}
 def resolve_income(stkcod):
     """หาบัญชีรายได้ของรหัสสินค้าบริการ จาก DB ที่เลือก (STMAS.ACCCOD -> ISACC ACCTYP='S' ACCNUM03)
@@ -274,6 +302,7 @@ def _read_header(path):
 def detect_mode(path):
     """ดูจากหัวคอลัมน์ว่าเป็นไฟล์โหมดไหน"""
     hdr = _read_header(path)
+    if "รหัสผู้โอน" in hdr or "รหัสรับโอน" in hdr:    return "bt"
     if "เลขที่เอกสาร" in hdr:                          return "petty"
     if "INVNO" in hdr and ("RECVNO" in hdr or "APNAME" in hdr): return "purchase"
     if "ยอดสุทธิ" in hdr or "เลขที่ใบกำกับ" in hdr: return "parts"
@@ -405,6 +434,36 @@ def read_petty(path):
                     "REMARK":str(g("หมายเหตุ") or "").strip(), "DESCRP":str(g("รายละเอียด") or "").strip(),
                     "ACCNUM":str(g("เลขที่บัญชี") or "").strip(), "AMOUNT":r2(g("จำนวนเงิน") or 0), "DATE":d})
     return out
+
+def read_bt(path):
+    """อ่านไฟล์โอนเงินระหว่างธนาคาร (.xlsx)"""
+    import openpyxl
+    ws = openpyxl.load_workbook(path, data_only=True).active
+    hdr = None; out = []
+    for row in ws.iter_rows(values_only=True):
+        if hdr is None:
+            hdr = {("" if c is None else str(c).strip()): i for i, c in enumerate(row)}; continue
+        g = lambda name: row[hdr[name]] if name in hdr and hdr[name] < len(row) else None
+        docnum = str(g("เลขที่เอกสาร") or "").strip()
+        if not docnum: continue
+        out.append({"DOCNUM":docnum, "DATE":xlsx_date(g("วันที่ทำรายการ")),
+                    "SRC":str(g("รหัสผู้โอน") or "").strip(), "DST":str(g("รหัสรับโอน") or "").strip(),
+                    "DEBIT":r2(g("จำนวนเงินหักบัญชี") or 0), "FEE":r2(g("ค่าธรรมเนียม") or 0),
+                    "DEPOSIT":r2(g("จำนวนเงินนำฝากเข้าบัญชี") or 0),
+                    "DETAIL":str(g("รายละเอียด") or "").strip(), "MEMO":str(g("คำอธิบาย") or "").strip()})
+    return out
+
+def group_bt_bills(rows):
+    """แต่ละแถว = 1 เอกสารโอนเงิน (ใช้เลขที่เอกสารจากไฟล์)"""
+    bills = []
+    for v in rows:
+        bills.append({"mode":"bt", "date":v["DATE"], "youref":v["DOCNUM"], "docnum":v["DOCNUM"],
+                      "src":v["SRC"], "dst":v["DST"], "debit":v["DEBIT"], "fee":v["FEE"],
+                      "deposit":v["DEPOSIT"], "detail":v["DETAIL"], "memo":v["MEMO"],
+                      "lines":[{"stk":v["DST"], "des":"เข้า "+v["DST"], "amt":v["DEPOSIT"]},
+                               {"stk":"ค่าธรรมเนียม", "des":"ค่าธรรมเนียมธนาคาร", "amt":v["FEE"]}],
+                      "sub":v["DEBIT"], "vat":0.0, "total":v["DEBIT"], "njobs":1})
+    return bills
 
 def group_petty_bills(rows):
     """แต่ละแถว = 1 เอกสาร DP (ใช้เลขที่เอกสารจากไฟล์)"""
@@ -620,9 +679,32 @@ def build_petty_all(bill, docnum, t_glptt, t_glpttit):
         "DOCNUM":docnum,"ACCNUM":l["acc"],"DEPCOD":"","DESCRP":l["des"],"AMOUNT":amt})
     return {"GLPTT":[glptt], "GLPTTIT":[glpttit]}
 
+def build_bt_all(bill, docnum, t_gljnl, t_gljit):
+    """โอนเงินระหว่างธนาคาร (BT): GLJNL + GLJNLIT 3 บรรทัด
+       Dr ปลายทาง(ฝากเข้า) SEQIT' 1' + Dr ค่าธรรมเนียม SEQIT' 2' + Cr ต้นทาง(หักบัญชี) SEQIT' 5'"""
+    d = bill["date"]; deposit, fee, debit = bill["deposit"], bill["fee"], bill["debit"]
+    src_acc, src_nm = resolve_bank(bill["src"])
+    dst_acc, dst_nm = resolve_bank(bill["dst"])
+    desc = bill["detail"] or f"โอนมาจาก {src_nm or bill['src']} ไปเข้า {dst_nm or bill['dst']} ธรรมเนียม {fee:,.2f}"
+    gljnl = [t_gljnl.build_record({
+        "JNLTYP":BT_JNLTYP,"VOUDAT":D(d),"VOUCHER":docnum,"DESCRP":desc,
+        "TRNSTAT":"P","DOCSTAT":"N","CREBY":USER_ID,"CREDAT":D(TODAY),
+        "USERID":USER_ID,"CHGDAT":D(TODAY)})]
+    def gl(acc, typ, amt, seqit, dep=""):
+        return t_gljit.build_record({"VOUCHER":docnum,"SEQIT":seqit,"VOUDAT":D(d),"ACCNUM":acc,
+            "DEPCOD":dep,"DESCRP":desc,"TRNTYP":typ,"AMOUNT":amt,
+            "CHGDAT":D(TODAY),"CHGTIM":CHGTIM})
+    git = [
+        gl(dst_acc or "", "0", deposit, " 1"),            # Dr ปลายทาง (ฝากเข้า)
+        gl(BT_FEE_ACC,    "0", fee,     " 2", BT_FEE_DEP),# Dr ค่าธรรมเนียม
+        gl(src_acc or "", "1", debit,   " 5"),            # Cr ต้นทาง (หักบัญชี)
+    ]
+    return {"GLJNL":gljnl, "GLJNLIT":git}
+
 def build_bill(bill, docnum, t):
     """เลือก builder ตามโหมดของบิล"""
     m = bill.get("mode")
+    if m=="bt":       return build_bt_all(bill, docnum, t["GLJNL"], t["GLJNLIT"])
     if m=="petty":    return build_petty_all(bill, docnum, t["GLPTT"], t["GLPTTIT"])
     if m=="purchase": return build_purchase_all(bill, docnum, t["APTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
     fn = build_parts_all if m=="parts" else build_all
@@ -631,6 +713,7 @@ def build_bill(bill, docnum, t):
 def load_source(xls, branch=None):
     """อ่านไฟล์ -> (mode, bills) ; branch ใช้เฉพาะโหมดซื้อ (ชุมพร/สุราษ)"""
     mode = detect_mode(xls)
+    if mode=="bt":       return mode, group_bt_bills(read_bt(xls))
     if mode=="petty":    return mode, group_petty_bills(read_petty(xls))
     if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls), branch)
     if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls), branch)
@@ -676,7 +759,7 @@ def count_items(path):
     """นับจำนวนรายการในไฟล์ตามโหมด"""
     m = detect_mode(path)
     rd = {"parts":read_parts_invoices, "purchase":read_purchase_receipts,
-          "petty":read_petty}.get(m, read_xls_jobs)
+          "petty":read_petty, "bt":read_bt}.get(m, read_xls_jobs)
     return len(rd(path))
 
 def pick_xls(arg):
@@ -686,7 +769,10 @@ def pick_xls(arg):
     return sorted(xs)[0]
 
 def plan_docnums(mode, t, bills, branch=None):
-    """คืน [(bill, docnum|None)] — petty ใช้เลขจากไฟล์, อื่นๆ รันต่อจากตารางหัว"""
+    """คืน [(bill, docnum|None)] — petty/bt ใช้เลขจากไฟล์, อื่นๆ รันต่อจากตารางหัว"""
+    if mode == "bt":
+        have = {t["GLJNL"].get(i).get("VOUCHER") for i in range(len(t["GLJNL"]))}
+        return [(b, None if b["docnum"] in have else b["docnum"]) for b in bills]
     if mode == "petty":
         have = {t["GLPTT"].get(i).get("DOCNUM") for i in range(len(t["GLPTT"]))}
         return [(b, None if b["docnum"] in have else b["docnum"]) for b in bills]
@@ -703,7 +789,7 @@ def cmd_preview(args, commit=False):
     xls = pick_xls(args.xls)
     branch = getattr(args, "branch", None)
     mode, bills = load_source(xls, branch)
-    unit = {"parts":"ใบกำกับ","purchase":"ใบรับ","petty":"รายการ"}.get(mode,"งาน")
+    unit = {"parts":"ใบกำกับ","purchase":"ใบรับ","petty":"รายการ","bt":"รายการ"}.get(mode,"งาน")
     nitems = sum(b["njobs"] for b in bills)
     t = open_tables()
     plan = plan_docnums(mode, t, bills, branch)
