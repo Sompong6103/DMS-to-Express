@@ -644,17 +644,15 @@ def build_purchase_all(bill, docnum, t_aptrn, t_gljnl, t_gljit, t_isvat, t_stcrd
     gljnl = [t_gljnl.build_record({
         "JNLTYP":PUR_JNLTYP,"VOUDAT":D(d),"VOUCHER":docnum,"DESCRP":desc,
         "TRNSTAT":"P","DOCSTAT":"N","CREBY":USER_ID,"CREDAT":D(TODAY),
-        "USERID":USER_ID,"CHGDAT":D(TODAY)}) for _ in range(2)]
+        "USERID":USER_ID,"CHGDAT":D(TODAY)})]                   # 1 voucher
 
     def gl(acc, typ, amt, seqit, dep):
         return t_gljit.build_record({"VOUCHER":docnum,"SEQIT":seqit,"VOUDAT":D(d),"ACCNUM":acc,
             "DEPCOD":dep,"DESCRP":desc,"TRNTYP":typ,"AMOUNT":amt,
             "CHGDAT":D(TODAY),"CHGTIM":CHGTIM,"CHGACCFROM":PUR_ACCFROM})
-    git = []
-    for _ in range(2):                                   # 2 ชุดเหมือนกัน
-        git += [gl(PUR_INV_ACC,"0",net,    " 1",DEP),    # Dr สินค้าคงเหลือ
-                gl(PUR_VATIN,  "0",vat,    " 3",DEP),    # Dr ภาษีซื้อ
-                gl(apacc,      "1",tot,    " 6","")]      # Cr เจ้าหนี้
+    git = [gl(PUR_INV_ACC,"0",net," 1",DEP),    # Dr สินค้าคงเหลือ
+           gl(PUR_VATIN,  "0",vat," 3",DEP),    # Dr ภาษีซื้อ
+           gl(apacc,      "1",tot," 6","")]      # Cr เจ้าหนี้ (3 บรรทัด ชุดเดียว)
 
     isvat = [t_isvat.build_record({
         "VATREC":"P","RECTYP":"3","VATPRD":D(vatprd),"VATDAT":D(d),"DOCDAT":D(d),
