@@ -68,13 +68,23 @@ def pur_cfg(branch): return PUR_BRANCHES.get(branch or PUR_DEFAULT_BRANCH, PUR_B
 # ───── โหมดจ่ายเงินสดย่อย (DP = จ่ายคชจ.จากเงินทดรองจ่ายย่อย) ─────
 PETTY_REFNUM = ""          # ใบเบิก (VR...) เว้นว่างไว้ (ระบุภายหลังได้)
 
-# คอลัมน์ xls -> (รหัสสินค้าบริการ STKCOD, บัญชีรายได้ GL, คำอธิบาย)  เรียงตามลำดับบรรทัดในบิล
-CATEGORIES = [
-    ("PARTNET", "41-7100-01", "4171-01", "รายได้ศูนย์บริการทั่วไป-อะไหล่(เงินสด)"),
-    ("OILNET",  "41-7100-02", "4171-03", "รายได้ศูนย์บริการทั่วไป-น้ำมัน(เงินสด)"),
-    ("SERVNET", "41-7100-03", "4171-05", "รายได้ศูนย์บริการทั่วไป-ค่าแรง(เงินสด)"),
-    ("OUTNET",  "41-7100-04", "4171-07", "รายได้ศูนย์บริการทั่วไป-จัดซื้อ(เงินสด)"),
-]
+# ───── โหมดขายเงินสด-ศูนย์บริการ (HC) : 2 สาขา ─────
+# cats: (คอลัมน์ xls, รหัสสินค้าบริการ STKCOD, คำอธิบาย) — บัญชีรายได้ดึงจาก DB อัตโนมัติ
+SERVICE_BRANCHES = {
+    "chumphon": {"name":"ชุมพร", "depcod":"", "slash":True, "cats":[
+        ("PARTNET", "41-7100-01", "รายได้ศูนย์บริการทั่วไป-อะไหล่(เงินสด)"),
+        ("OILNET",  "41-7100-02", "รายได้ศูนย์บริการทั่วไป-น้ำมัน(เงินสด)"),
+        ("SERVNET", "41-7100-03", "รายได้ศูนย์บริการทั่วไป-ค่าแรง(เงินสด)"),
+        ("OUTNET",  "41-7100-04", "รายได้ศูนย์บริการทั่วไป-จัดซื้อ(เงินสด)"),
+    ]},
+    "surat": {"name":"สุราษ", "depcod":"ศ3", "slash":False, "cats":[
+        ("PARTNET", "4300-03", "รายได้จากการให้บริการ-อะไหล่(เงินสด)"),
+        ("OILNET",  "4300-02", "รายได้จากการให้บริการ-น้ำมัน(เงินสด)"),
+        ("SERVNET", "4300-01", "รายได้จากการให้บริการ-ค่าแรง(เงินสด)"),
+        ("OUTNET",  "4300-04", "รายได้จากการให้บริการ-อะไหล่จัดซื้อ(เงินสด)"),
+    ]},
+}
+def service_cfg(branch): return SERVICE_BRANCHES.get(branch or "chumphon", SERVICE_BRANCHES["chumphon"])
 DESC_PREFIX = "ขายสดให้"   # คำขึ้นต้นคำอธิบายรายการบัญชี
 
 # ───────────────────────── DBF CODEC ─────────────────────────
@@ -189,6 +199,27 @@ def yymm(d):
 
 def r2(x): return round(float(x) + 1e-9, 2)
 
+_income_cache = {}
+def resolve_income(stkcod):
+    """หาบัญชีรายได้ของรหัสสินค้าบริการ จาก DB ที่เลือก (STMAS.ACCCOD -> ISACC ACCTYP='S' ACCNUM03)
+       คืน None ถ้าหาไม่เจอ (ผู้เรียกใช้ fallback เอง)"""
+    if DB_DIR not in _income_cache:
+        smap = {}; amap = {}
+        try:
+            isacc = DBF(os.path.join(DB_DIR, "ISACC.DBF"))
+            for i in range(len(isacc)):
+                r = isacc.get(i)
+                if r.get("ACCTYP") == "S": amap[str(r.get("ACCCOD"))] = r.get("ACCNUM03")
+            stmas = DBF(os.path.join(DB_DIR, "STMAS.DBF"))
+            for i in range(len(stmas)):
+                r = stmas.get(i); smap[str(r.get("STKCOD"))] = str(r.get("ACCCOD"))
+        except Exception:
+            pass
+        _income_cache[DB_DIR] = (smap, amap)
+    smap, amap = _income_cache[DB_DIR]
+    acc = amap.get(smap.get(stkcod))
+    return acc or None
+
 def read_xls_jobs(path):
     import xlrd
     sh = xlrd.open_workbook(path).sheet_by_index(0)
@@ -205,8 +236,9 @@ def read_xls_jobs(path):
         })
     return jobs
 
-def group_bills(jobs):
-    """รวม job ตามวันที่ -> 1 บิล/วัน"""
+def group_bills(jobs, branch=None):
+    """รวม job ตามวันที่ -> 1 บิล/วัน ; cats ตามสาขา (ชุมพร/สุราษ)"""
+    cfg = service_cfg(branch)
     by_date = {}
     for j in jobs:
         by_date.setdefault(j["DATE"], []).append(j)
@@ -216,15 +248,15 @@ def group_bills(jobs):
         taxnos = sorted(j["TAXNO"] for j in grp)
         youref = taxnos[0] if taxnos[0]==taxnos[-1] else f"{taxnos[0]}-{taxnos[-1]}"
         lines = []
-        for col, stk, acc, des in CATEGORIES:
+        for col, stk, des in cfg["cats"]:
             amt = r2(sum(j[col] for j in grp))
             if amt != 0:
-                lines.append({"col":col, "stk":stk, "acc":acc, "des":des, "amt":amt})
+                lines.append({"col":col, "stk":stk, "des":des, "amt":amt})
         if not lines: continue
         sub = r2(sum(l["amt"] for l in lines))
         vat = r2(sub * VAT_RATE / 100.0)
-        bills.append({"mode":"service", "date":d, "youref":youref, "lines":lines,
-                      "sub":sub, "vat":vat, "total":r2(sub+vat), "njobs":len(grp)})
+        bills.append({"mode":"service", "branch": branch or "chumphon", "date":d, "youref":youref,
+                      "lines":lines, "sub":sub, "vat":vat, "total":r2(sub+vat), "njobs":len(grp)})
     return bills
 
 # ───────────────────────── โหมดอะไหล่ (parts) ─────────────────────────
@@ -391,13 +423,13 @@ def D(d): return d.strftime("%Y%m%d")
 def build_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
     """คืน dict {table: [record-bytes,...]} สำหรับบิล 1 ใบ"""
     d, sub, vat, tot = bill["date"], bill["sub"], bill["vat"], bill["total"]
-    youref = bill["youref"]
+    youref = bill["youref"]; DEP = service_cfg(bill.get("branch"))["depcod"]
     gdesc  = f"{DESC_PREFIX}     {youref}"          # คำอธิบายบรรทัดบัญชี (5 ช่องว่าง)
     nlines = len(bill["lines"])
 
     # --- ARTRN (หัวบิล) ---
     artrn = t_artrn.build_record({
-        "RECTYP":"1","DOCNUM":docnum,"DOCDAT":D(d),"FLGVAT":"2","CUSCOD":CUST_CODE,
+        "RECTYP":"1","DOCNUM":docnum,"DOCDAT":D(d),"DEPCOD":DEP,"FLGVAT":"2","CUSCOD":CUST_CODE,
         "YOUREF":youref,"DUEDAT":D(d),"BILNUM":"~","NXTSEQ":f"{nlines:>3}",
         "AMOUNT":sub,"DISCAMT":0.0,"AFTDISC":sub,"ADVNUM":"AI","ADVAMT":0.0,"TOTAL":sub,
         "AMTRAT0":0.0,"VATRAT":VAT_RATE,"VATAMT":vat,"NETAMT":tot,"NETVAL":sub,
@@ -418,26 +450,26 @@ def build_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
     git = []
     # บรรทัดสถิติ (SEQIT=' 5') : เดบิต 4111-01 = ยอดก่อน VAT
     git.append(t_gljit.build_record({
-        "VOUCHER":docnum,"SEQIT":" 5","VOUDAT":D(d),"ACCNUM":STAT_ACC,
+        "VOUCHER":docnum,"SEQIT":" 5","VOUDAT":D(d),"ACCNUM":STAT_ACC,"DEPCOD":DEP,
         "DESCRP":f"{DESC_PREFIX}      \xa0{CUST_CODE}","TRNTYP":"0","AMOUNT":sub,
         "CHGDAT":D(TODAY),"CHGTIM":CHGTIM,"CHGACCFROM":STAT_FROM,
     }))
-    # บรรทัดรายได้ (เครดิต) ตามหมวดที่มียอด
+    # บรรทัดรายได้ (เครดิต) ตามหมวดที่มียอด — บัญชีดึงจาก DB
     for l in bill["lines"]:
         git.append(t_gljit.build_record({
-            "VOUCHER":docnum,"SEQIT":" 2","VOUDAT":D(d),"ACCNUM":l["acc"],
-            "DESCRP":gdesc,"TRNTYP":"1","AMOUNT":l["amt"],
+            "VOUCHER":docnum,"SEQIT":" 2","VOUDAT":D(d),"ACCNUM":resolve_income(l["stk"]) or l.get("acc",""),
+            "DEPCOD":DEP,"DESCRP":gdesc,"TRNTYP":"1","AMOUNT":l["amt"],
             "CHGDAT":D(TODAY),"CHGTIM":CHGTIM,
         }))
     # เดบิต เงินสด = ยอดรวมทั้งสิ้น
     git.append(t_gljit.build_record({
-        "VOUCHER":docnum,"SEQIT":" 2","VOUDAT":D(d),"ACCNUM":CASH_ACC,
+        "VOUCHER":docnum,"SEQIT":" 2","VOUDAT":D(d),"ACCNUM":CASH_ACC,"DEPCOD":DEP,
         "DESCRP":gdesc,"TRNTYP":"0","AMOUNT":tot,
         "CHGDAT":D(TODAY),"CHGTIM":CHGTIM,"CHGACCFROM":STAT_FROM,
     }))
     # เครดิต ภาษีขาย
     git.append(t_gljit.build_record({
-        "VOUCHER":docnum,"SEQIT":" 2","VOUDAT":D(d),"ACCNUM":VAT_ACC,
+        "VOUCHER":docnum,"SEQIT":" 2","VOUDAT":D(d),"ACCNUM":VAT_ACC,"DEPCOD":DEP,
         "DESCRP":gdesc,"TRNTYP":"1","AMOUNT":vat,
         "CHGDAT":D(TODAY),"CHGTIM":CHGTIM,
     }))
@@ -446,7 +478,7 @@ def build_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
     vatprd = d.replace(day=1)
     isvat = t_isvat.build_record({
         "VATREC":"S","RECTYP":"1","VATPRD":D(vatprd),"VATDAT":D(d),"DOCDAT":D(d),
-        "DOCNUM":docnum,"REFNUM":docnum,"DESCRP":gdesc,"AMT01":sub,"VAT01":vat,
+        "DOCNUM":docnum,"REFNUM":docnum,"DEPCOD":DEP,"DESCRP":gdesc,"AMT01":sub,"VAT01":vat,
         "AMT02":0.0,"VAT02":0.0,"AMTRAT0":0.0,"SELF_ADDED":"N","HAD_MODIFY":"N",
         "DOCSTAT":"N","TAXID":"0000000000000","ORGNUM":0,
     })
@@ -456,7 +488,7 @@ def build_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
     for i, l in enumerate(bill["lines"], 1):
         stcrd.append(t_stcrd.build_record({
             "STKCOD":l["stk"],"LOCCOD":"01","DOCNUM":docnum,"SEQNUM":f"{i:>3}",
-            "DOCDAT":D(d),"POSOPR":"9","PEOPLE":CUST_CODE,"TRNQTY":1.0,"TQUCOD":"คน",
+            "DOCDAT":D(d),"DEPCOD":DEP,"POSOPR":"9","PEOPLE":CUST_CODE,"TRNQTY":1.0,"TQUCOD":"คน",
             "TFACTOR":1.0,"UNITPR":l["amt"],"DISCAMT":0.0,"TRNVAL":l["amt"],"PHYBAL":0.0,
             "XTRNQTY":1.0,"XUNITPR":0.0,"XTRNVAL":0.0,"XSALVAL":l["amt"],"NETVAL":l["amt"],
             "STKDES":l["des"],
@@ -470,7 +502,7 @@ def build_parts_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
     youref = bill["youref"]; cfg = parts_cfg(bill.get("branch"))
     descA = f"{DESC_PREFIX}      \xa0{CUST_CODE}"     # ชุดสรุป (ชื่อลูกค้าเงินสด)
     descB = f"{DESC_PREFIX}     {youref}"            # ชุดอ้างอิงเลขใบกำกับ
-    DEP   = cfg["depcod"]; INCOME = cfg["income"]
+    DEP   = cfg["depcod"]; INCOME = resolve_income(cfg["stkcod"]) or cfg["income"]
 
     artrn = t_artrn.build_record({
         "RECTYP":"1","DOCNUM":docnum,"DOCDAT":D(d),"DEPCOD":DEP,"FLGVAT":"2","CUSCOD":CUST_CODE,
@@ -602,7 +634,7 @@ def load_source(xls, branch=None):
     if mode=="petty":    return mode, group_petty_bills(read_petty(xls))
     if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls), branch)
     if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls), branch)
-    return mode, group_bills(read_xls_jobs(xls))
+    return mode, group_bills(read_xls_jobs(xls), branch)
 
 # ───────────────────────── running number ─────────────────────────
 def prefix_for(bills):
@@ -664,7 +696,8 @@ def plan_docnums(mode, t, bills, branch=None):
     if mode == "parts":
         return next_numbers(t["ARTRN"], bills, prefix=PARTS_PREFIX, dedup_field="YOUREF",
                             slash=parts_cfg(branch)["slash"])
-    return next_numbers(t["ARTRN"], bills, dedup_field="YOUREF")
+    return next_numbers(t["ARTRN"], bills, prefix=DOC_PREFIX, dedup_field="YOUREF",
+                        slash=service_cfg(branch)["slash"])
 
 def cmd_preview(args, commit=False):
     xls = pick_xls(args.xls)

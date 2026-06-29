@@ -194,10 +194,37 @@ def verify_petty(xls):
     print("เอกสาร DP จะยังไม่ผ่านบัญชี (DOCSTAT=N) ตามรูปแบบเงินสดย่อยปกติ")
     print("\n✓ โครงสร้างถูกต้อง — ดูรายละเอียดแต่ละเอกสารที่ปุ่มดูตัวอย่าง")
 
+def verify_generic(xls, branch=None):
+    """ตรวจโครงสร้าง+สมดุล GL + โชว์บัญชีรายได้ที่ดึงจาก DB (ใช้กับสาขาที่ไม่มีตัวอย่างเทียบ byte)"""
+    mode, bills = EX.load_source(xls, branch)
+    t = EX.open_tables()
+    plan = EX.plan_docnums(mode, t, bills, branch)
+    new = [(b,dn) for b,dn in plan if dn]
+    print(f"โหมด {mode} · สาขา {EX.service_cfg(branch)['name'] if mode=='service' else (EX.parts_cfg(branch)['name'])} : {len(bills)} บิล (ใหม่ {len(new)})")
+    bad = 0
+    for b,dn in new[:300]:
+        git = EX.build_bill(b,dn,t).get("GLJNLIT",[])
+        dr=cr=0
+        for m in git:
+            x = EX.decode_built(t["GLJNLIT"], m)
+            if x["SEQIT"].strip()=="5": continue          # บรรทัดสถิติ ไม่นับสมดุล
+            if x["TRNTYP"]=="0": dr+=x["AMOUNT"]
+            else: cr+=x["AMOUNT"]
+        if git and abs(dr-cr)>0.01: bad+=1
+    print("ตรวจสมดุล GL (ไม่นับบรรทัดสถิติ): " + ("✓ สมดุลทุกใบ" if bad==0 else f"✗ {bad} ใบไม่สมดุล"))
+    if bills:
+        print("บัญชีรายได้ที่ดึงจากฐานข้อมูลที่เลือก:")
+        for l in bills[0]["lines"]:
+            inc = EX.resolve_income(l["stk"])
+            print(f"   {l['stk']:12} {l['des'][:34]:34} -> {inc or '⚠️ หาไม่เจอใน DB นี้ (เลือก DB ให้ถูกสาขา)'}")
+    print("\n✓ ดูรายละเอียดแต่ละบิลที่ปุ่มดูตัวอย่าง")
+
 def verify_text(xls, branch=None):
     m = EX.detect_mode(xls)
     if m=="petty":    return capture(verify_petty, xls)
     if m=="purchase": return capture(verify_purchase, xls, branch)
+    if branch=="surat":                                  # ไม่มีตัวอย่างสุราษให้เทียบ byte
+        return capture(verify_generic, xls, branch)
     fn = EX.cmd_verify_parts if m=="parts" else EX.cmd_verify
     return capture(fn, _args(xls))
 
@@ -343,7 +370,7 @@ function setMode(m){
   $('#tab-parts').classList.toggle('on',m==='parts');
   $('#tab-purchase').classList.toggle('on',m==='purchase');
   $('#tab-petty').classList.toggle('on',m==='petty');
-  $('#branchrow').style.display = (m==='purchase'||m==='parts') ? 'flex' : 'none';
+  $('#branchrow').style.display = (m && m!=='petty') ? 'flex' : 'none';
 }
 function branchVal(){ return $('#branch') ? $('#branch').value : 'chumphon'; }
 function fmt(n){return n.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}
