@@ -465,7 +465,7 @@ def group_bt_bills(rows, branch=None):
                       "date":v["DATE"], "youref":v["DOCNUM"], "docnum":v["DOCNUM"],
                       "src":v["SRC"], "dst":v["DST"], "debit":v["DEBIT"], "fee":v["FEE"],
                       "deposit":v["DEPOSIT"], "detail":v["DETAIL"], "memo":v["MEMO"],
-                      "lines":[{"stk":v["DST"], "des":"เข้า "+v["DST"], "amt":v["DEPOSIT"]},
+                      "lines":[{"stk":f"{v['SRC']} → {v['DST']}", "des":f"โอนจาก {v['SRC']} เข้า {v['DST']}", "amt":v["DEPOSIT"]},
                                {"stk":"ค่าธรรมเนียม", "des":"ค่าธรรมเนียมธนาคาร", "amt":v["FEE"]}],
                       "sub":v["DEBIT"], "vat":0.0, "total":v["DEBIT"], "njobs":1})
     return bills
