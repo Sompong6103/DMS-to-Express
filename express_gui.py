@@ -280,10 +280,10 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
   <div class="dim" style="margin-top:-4px">⬆️ อัปโหลด = ใช้ไฟล์ xls จากเครื่องที่เปิดหน้านี้  ·  เลือกบน server = ไฟล์ที่อยู่บนเครื่องหลัก</div>
   <div class="frow" id="branchrow" style="display:none;margin-top:12px">
     <div>
-      <label>🏢 สาขา (เฉพาะโหมดซื้อ RS) — เลือกให้ตรงกับฐานข้อมูลที่เลือก</label>
+      <label>🏢 สาขา (สำหรับโหมดซื้อ RS / อะไหล่ HO) — เลือกให้ตรงกับฐานข้อมูลที่เลือก</label>
       <select id="branch" style="padding:9px;border-radius:9px;border:1px solid #334155;background:#0b1220;color:#e2e8f0;font-size:13px">
-        <option value="chumphon">ชุมพร (P078 · แผนก 106 · 11-6200-01 · มี /)</option>
-        <option value="surat">สุราษ (P091 · แผนก ซ2 · 5000 · ไม่มี /)</option>
+        <option value="chumphon">ชุมพร (เดิม · เลขที่มี /)</option>
+        <option value="surat">สุราษ (เลขที่ไม่มี / · RS:P091/ซ2/5000 · HO:แผนกข9/420003)</option>
       </select>
     </div>
   </div>
@@ -343,7 +343,7 @@ function setMode(m){
   $('#tab-parts').classList.toggle('on',m==='parts');
   $('#tab-purchase').classList.toggle('on',m==='purchase');
   $('#tab-petty').classList.toggle('on',m==='petty');
-  $('#branchrow').style.display = (m==='purchase') ? 'flex' : 'none';
+  $('#branchrow').style.display = (m==='purchase'||m==='parts') ? 'flex' : 'none';
 }
 function branchVal(){ return $('#branch') ? $('#branch').value : 'chumphon'; }
 function fmt(n){return n.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}

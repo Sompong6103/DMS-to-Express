@@ -37,10 +37,14 @@ JNLTYP     = "03"
 
 # ───── โหมดอะไหล่ (ขายเงินสด-อะไหล่) ─────
 PARTS_PREFIX = "HO"        # บิลขายเงินสด-อะไหล่
-PARTS_DEPCOD = "106"       # แผนกอะไหล่
-PARTS_INCOME = "4131-02"   # บัญชีรายได้ขายอะไหล่
-PARTS_STKCOD = "41-3100-02"
-PARTS_STKDES = "รายได้จากการขายอะไหล่และอุปกรณ์(เงินสด)"
+# 2 สาขา: ชุมพร (เดิม) / สุราษ
+PARTS_BRANCHES = {
+    "chumphon": {"name":"ชุมพร", "depcod":"106", "income":"4131-02",
+                 "stkcod":"41-3100-02", "stkdes":"รายได้จากการขายอะไหล่และอุปกรณ์(เงินสด)", "slash":True},
+    "surat":    {"name":"สุราษ", "depcod":"ข9", "income":"4131-02",
+                 "stkcod":"420003", "stkdes":"รายได้จากการขายอะไหล่-เงินสด", "slash":False},
+}
+def parts_cfg(branch): return PARTS_BRANCHES.get(branch or "chumphon", PARTS_BRANCHES["chumphon"])
 
 # ───── โหมดซื้อเงินเชื่อ-อะไหล่ (RS) ─────
 PUR_PREFIX  = "RS"         # ใบรับสินค้า/ซื้อเงินเชื่อ-อะไหล่
@@ -258,8 +262,9 @@ def read_parts_invoices(path):
                     "NET":r2(g(r,"ยอดสุทธิ")), "VAT":r2(g(r,"ภาษีมูลค่าเพิ่ม"))})
     return inv
 
-def group_parts_bills(invs):
-    """รวมใบกำกับตามวันที่ -> 1 บิล/วัน (ยอดสุทธิรวม 1 บรรทัด)"""
+def group_parts_bills(invs, branch=None):
+    """รวมใบกำกับตามวันที่ -> 1 บิล/วัน (ยอดสุทธิรวม 1 บรรทัด) ; cfg ตามสาขา"""
+    cfg = parts_cfg(branch)
     by_date = {}
     for v in invs:
         by_date.setdefault(v["DATE"], []).append(v)
@@ -270,9 +275,9 @@ def group_parts_bills(invs):
         youref = nos[0] if len(nos)==1 else f"{nos[0]}-{nos[-1][-4:]}"
         net = r2(sum(v["NET"] for v in grp))
         vat = r2(sum(v["VAT"] for v in grp))
-        bills.append({"mode":"parts", "date":d, "youref":youref,
-                      "lines":[{"stk":PARTS_STKCOD, "acc":PARTS_INCOME,
-                                "des":PARTS_STKDES, "amt":net}],
+        bills.append({"mode":"parts", "branch": branch or "chumphon", "date":d, "youref":youref,
+                      "lines":[{"stk":cfg["stkcod"], "acc":cfg["income"],
+                                "des":cfg["stkdes"], "amt":net}],
                       "invoices":grp, "sub":net, "vat":vat, "total":r2(net+vat),
                       "njobs":len(grp)})
     return bills
@@ -462,10 +467,10 @@ def build_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
 def build_parts_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
     """บิลขายเงินสด-อะไหล่ (HO): ยอดสุทธิรวม 1 บรรทัด + GL 2 ชุด + ภาษีรายใบกำกับ"""
     d, net, vat, tot = bill["date"], bill["sub"], bill["vat"], bill["total"]
-    youref = bill["youref"]
+    youref = bill["youref"]; cfg = parts_cfg(bill.get("branch"))
     descA = f"{DESC_PREFIX}      \xa0{CUST_CODE}"     # ชุดสรุป (ชื่อลูกค้าเงินสด)
     descB = f"{DESC_PREFIX}     {youref}"            # ชุดอ้างอิงเลขใบกำกับ
-    DEP   = PARTS_DEPCOD
+    DEP   = cfg["depcod"]; INCOME = cfg["income"]
 
     artrn = t_artrn.build_record({
         "RECTYP":"1","DOCNUM":docnum,"DOCDAT":D(d),"DEPCOD":DEP,"FLGVAT":"2","CUSCOD":CUST_CODE,
@@ -490,10 +495,10 @@ def build_parts_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
             "CHGDAT":D(TODAY),"CHGTIM":CHGTIM,"CHGACCFROM":frm})
     git = [
         gl(CASH_ACC,    "0", tot, descA, " 2", STAT_FROM),   # ชุดสรุป
-        gl(PARTS_INCOME,"1", net, descA, " 5", STAT_FROM),
+        gl(INCOME,"1", net, descA, " 5", STAT_FROM),
         gl(VAT_ACC,     "1", vat, descA, " 6", STAT_FROM),
         gl(CASH_ACC,    "0", tot, descB, " 2", STAT_FROM),   # ชุดอ้างอิง
-        gl(PARTS_INCOME,"1", net, descB, " 2"),
+        gl(INCOME,"1", net, descB, " 2"),
         gl(VAT_ACC,     "1", vat, descB, " 2"),
     ]
 
@@ -514,10 +519,10 @@ def build_parts_all(bill, docnum, t_artrn, t_gljnl, t_gljit, t_isvat, t_stcrd):
 
     # STCRD: 1 บรรทัด (ยอดสุทธิรวม)
     stcrd = [t_stcrd.build_record({
-        "STKCOD":PARTS_STKCOD,"LOCCOD":"01","DOCNUM":docnum,"SEQNUM":"  1","DOCDAT":D(d),
+        "STKCOD":cfg["stkcod"],"LOCCOD":"01","DOCNUM":docnum,"SEQNUM":"  1","DOCDAT":D(d),
         "DEPCOD":DEP,"POSOPR":"9","PEOPLE":CUST_CODE,"TRNQTY":1.0,"TQUCOD":"คน","TFACTOR":1.0,
         "UNITPR":net,"DISCAMT":0.0,"TRNVAL":net,"PHYBAL":0.0,"XTRNQTY":1.0,"XUNITPR":0.0,
-        "XTRNVAL":0.0,"XSALVAL":net,"NETVAL":net,"STKDES":PARTS_STKDES})]
+        "XTRNVAL":0.0,"XSALVAL":net,"NETVAL":net,"STKDES":cfg["stkdes"]})]
 
     return {"ARTRN":[artrn],"GLJNL":gljnl,"GLJNLIT":git,"ISVAT":isvat,"STCRD":stcrd}
 
@@ -596,7 +601,7 @@ def load_source(xls, branch=None):
     mode = detect_mode(xls)
     if mode=="petty":    return mode, group_petty_bills(read_petty(xls))
     if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls), branch)
-    if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls))
+    if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls), branch)
     return mode, group_bills(read_xls_jobs(xls))
 
 # ───────────────────────── running number ─────────────────────────
@@ -656,6 +661,9 @@ def plan_docnums(mode, t, bills, branch=None):
     if mode == "purchase":
         return next_numbers(t["APTRN"], bills, prefix=PUR_PREFIX, dedup_field="REFNUM",
                             slash=pur_cfg(branch)["slash"])
+    if mode == "parts":
+        return next_numbers(t["ARTRN"], bills, prefix=PARTS_PREFIX, dedup_field="YOUREF",
+                            slash=parts_cfg(branch)["slash"])
     return next_numbers(t["ARTRN"], bills, dedup_field="YOUREF")
 
 def cmd_preview(args, commit=False):
@@ -785,8 +793,9 @@ def cmd_verify(args):
 def cmd_verify_parts(args):
     """สร้าง HO6905/013 ใหม่จากข้อมูลที่รู้ แล้วเทียบ byte กับของจริง (ยกเว้น DESCRP/ผู้ใช้)"""
     import datetime as _dt
-    bill = {"mode":"parts","date":_dt.date(2026,5,29),"youref":"1CB-26050029",
-            "lines":[{"stk":PARTS_STKCOD,"acc":PARTS_INCOME,"des":PARTS_STKDES,"amt":280.0}],
+    _c = parts_cfg("chumphon")
+    bill = {"mode":"parts","branch":"chumphon","date":_dt.date(2026,5,29),"youref":"1CB-26050029",
+            "lines":[{"stk":_c["stkcod"],"acc":_c["income"],"des":_c["stkdes"],"amt":280.0}],
             "invoices":[{"INV":"1CB-26050029","DATE":_dt.date(2026,5,29),
                          "CUSNAME":"บริษัท มิตรแท้ ชุมพร จำกัด","NET":280.0,"VAT":19.6}],
             "sub":280.0,"vat":19.6,"total":299.6,"njobs":1}
