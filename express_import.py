@@ -737,7 +737,8 @@ def next_numbers(t_hdr, bills, prefix=None, dedup_field="YOUREF", slash=True):
     prefix = prefix or prefix_for(bills)
     used = {}; existing = set()
     for i in range(len(t_hdr)):
-        dn = t_hdr.get(i).get("DOCNUM") or ""
+        rec = t_hdr.get(i)
+        dn = rec.get("DOCNUM") or ""
         if not dn.startswith(prefix): continue
         body = dn[len(prefix):]
         if slash:
@@ -745,8 +746,9 @@ def next_numbers(t_hdr, bills, prefix=None, dedup_field="YOUREF", slash=True):
         else:
             ym, nn = body[:4], body[4:]            # RS|6906|014
         if ym.isdigit() and nn.isdigit():
-            used[ym] = max(used.get(ym,0), int(nn))
-            existing.add(t_hdr.get(i).get(dedup_field))
+            used[ym] = max(used.get(ym,0), int(nn))   # นับเลขรันรวม record ที่ลบ (กันเลขซ้ำ)
+            if not rec["_deleted"]:                   # เช็คซ้ำ: ไม่นับที่ลบไปแล้ว (ลบใน Express แล้วนำเข้าใหม่ได้)
+                existing.add(rec.get(dedup_field))
     sep = "/" if slash else ""
     out = []
     for b in bills:
@@ -775,13 +777,21 @@ def pick_xls(arg):
     if not xs: sys.exit("ไม่พบไฟล์ .xls ที่มีข้อมูลใน " + XLS_DIR)
     return sorted(xs)[0]
 
+def _active_keys(dbf, field):
+    """ค่า field ของ record ที่ยังไม่ถูกลบ (เลขที่ถูกลบใน Express แต่ยังไม่ PACK จะไม่ถูกนับ)"""
+    out = set()
+    for i in range(len(dbf)):
+        r = dbf.get(i)
+        if not r["_deleted"]: out.add(r.get(field))
+    return out
+
 def plan_docnums(mode, t, bills, branch=None):
     """คืน [(bill, docnum|None)] — petty/bt ใช้เลขจากไฟล์, อื่นๆ รันต่อจากตารางหัว"""
     if mode == "bt":
-        have = {t["GLJNL"].get(i).get("VOUCHER") for i in range(len(t["GLJNL"]))}
+        have = _active_keys(t["GLJNL"], "VOUCHER")
         return [(b, None if b["docnum"] in have else b["docnum"]) for b in bills]
     if mode == "petty":
-        have = {t["GLPTT"].get(i).get("DOCNUM") for i in range(len(t["GLPTT"]))}
+        have = _active_keys(t["GLPTT"], "DOCNUM")
         return [(b, None if b["docnum"] in have else b["docnum"]) for b in bills]
     if mode == "purchase":
         return next_numbers(t["APTRN"], bills, prefix=PUR_PREFIX, dedup_field="REFNUM",
