@@ -137,7 +137,7 @@ def listdir(path, want_files=False):
             "home": os.path.expanduser("~")}
 
 # ───────── helpers ─────────
-def _args(xls): return type("A", (), {"xls": xls})()
+def _args(xls, branch=None): return type("A", (), {"xls": xls, "branch": branch})()
 
 def clean(text):
     return "\n".join(ln for ln in text.splitlines()
@@ -151,10 +151,10 @@ def capture(fn, *a, **k):
         except Exception:       buf.write("\n" + traceback.format_exc())
     return clean(buf.getvalue())
 
-def preview_data(xls):
-    mode, bills = EX.load_source(xls)
+def preview_data(xls, branch=None):
+    mode, bills = EX.load_source(xls, branch)
     t     = EX.open_tables()
-    plan  = EX.plan_docnums(mode, t, bills)
+    plan  = EX.plan_docnums(mode, t, bills, branch)
     out   = []
     for b, docnum in plan:
         out.append({"docnum": docnum, "skipped": docnum is None,
@@ -165,12 +165,13 @@ def preview_data(xls):
     return {"file": os.path.basename(xls), "mode": mode, "njobs": sum(b["njobs"] for b in bills),
             "nbills": len(bills), "nnew": new, "bills": out}
 
-def verify_purchase(xls):
+def verify_purchase(xls, branch=None):
     """ตรวจโครงสร้างโหมดซื้อ: ทุกบิลต้องสมดุล Dr=Cr และบัญชี/ผู้ขายถูกต้อง"""
-    mode, bills = EX.load_source(xls)
+    mode, bills = EX.load_source(xls, branch)
     t = EX.open_tables()
     ven = bills[0]["vendor"] if bills else {}
-    print(f"ผู้ขาย: {ven.get('SUPCOD')} ({ven.get('SUPNAM','')[:30]}) | เจ้าหนี้ {ven.get('APACC')} | เลขภาษี {ven.get('TAXID')}")
+    cfg = EX.pur_cfg(branch)
+    print(f"สาขา: {cfg['name']} | ผู้ขาย: {ven.get('SUPCOD')} ({ven.get('SUPNAM','')[:24]}) | แผนก {cfg['depcod']} | รหัสสินค้า {cfg['stkcod']} | เครดิต {EX.PUR_PAYTRM} วัน")
     bad = 0
     for b in bills[:200]:
         recs = EX.build_purchase_all(b,"RS0000/000",t["APTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
@@ -193,10 +194,10 @@ def verify_petty(xls):
     print("เอกสาร DP จะยังไม่ผ่านบัญชี (DOCSTAT=N) ตามรูปแบบเงินสดย่อยปกติ")
     print("\n✓ โครงสร้างถูกต้อง — ดูรายละเอียดแต่ละเอกสารที่ปุ่มดูตัวอย่าง")
 
-def verify_text(xls):
+def verify_text(xls, branch=None):
     m = EX.detect_mode(xls)
     if m=="petty":    return capture(verify_petty, xls)
-    if m=="purchase": return capture(verify_purchase, xls)
+    if m=="purchase": return capture(verify_purchase, xls, branch)
     fn = EX.cmd_verify_parts if m=="parts" else EX.cmd_verify
     return capture(fn, _args(xls))
 
@@ -277,6 +278,15 @@ pre{white-space:pre-wrap;background:#0b1220;padding:14px;border-radius:10px;font
   </div>
   <input type="file" id="uplinput" accept=".xls,.xlsx" style="display:none">
   <div class="dim" style="margin-top:-4px">⬆️ อัปโหลด = ใช้ไฟล์ xls จากเครื่องที่เปิดหน้านี้  ·  เลือกบน server = ไฟล์ที่อยู่บนเครื่องหลัก</div>
+  <div class="frow" id="branchrow" style="display:none;margin-top:12px">
+    <div>
+      <label>🏢 สาขา (เฉพาะโหมดซื้อ RS) — เลือกให้ตรงกับฐานข้อมูลที่เลือก</label>
+      <select id="branch" style="padding:9px;border-radius:9px;border:1px solid #334155;background:#0b1220;color:#e2e8f0;font-size:13px">
+        <option value="chumphon">ชุมพร (P078 · แผนก 106 · 11-6200-01 · มี /)</option>
+        <option value="surat">สุราษ (P091 · แผนก ซ2 · 5000 · ไม่มี /)</option>
+      </select>
+    </div>
+  </div>
   <div class="btns">
     <button class="b-prev" onclick="act('preview')">👁 ดูตัวอย่างบิล</button>
     <button class="b-ver"  onclick="act('verify')">🔍 ตรวจสอบความถูกต้อง</button>
@@ -333,7 +343,9 @@ function setMode(m){
   $('#tab-parts').classList.toggle('on',m==='parts');
   $('#tab-purchase').classList.toggle('on',m==='purchase');
   $('#tab-petty').classList.toggle('on',m==='petty');
+  $('#branchrow').style.display = (m==='purchase') ? 'flex' : 'none';
 }
+function branchVal(){ return $('#branch') ? $('#branch').value : 'chumphon'; }
 function fmt(n){return n.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})}
 function busy(b,msg){$('#status').innerHTML=b?'<span class="spin"></span> '+msg:(msg||'');
   document.querySelectorAll('.card button').forEach(x=>x.disabled=b);}
@@ -385,12 +397,13 @@ function renderPreview(d){
 async function act(cmd){
   if(!selXls){alert('ยังไม่ได้เลือกไฟล์ xls');return;}
   busy(true, cmd==='preview'?'กำลังคำนวณ...':'กำลังตรวจสอบ...');
+  const bq='&branch='+branchVal();
   try{
     if(cmd==='preview'){
-      const d=await (await afetch('/api/preview?xls='+encodeURIComponent(selXls))).json();
+      const d=await (await afetch('/api/preview?xls='+encodeURIComponent(selXls)+bq)).json();
       d.error?$('#result').innerHTML='<pre style="color:#fca5a5">'+d.error+'</pre>':renderPreview(d);
     }else{
-      const d=await (await afetch('/api/'+cmd+'?xls='+encodeURIComponent(selXls))).json();
+      const d=await (await afetch('/api/'+cmd+'?xls='+encodeURIComponent(selXls)+bq)).json();
       $('#result').innerHTML='<pre>'+(d.text||d.error)+'</pre>';
     }
   }catch(e){$('#result').innerHTML='<pre style="color:#fca5a5">'+e+'</pre>';}
@@ -401,7 +414,7 @@ async function commit(){
   if(!confirm('ยืนยันบันทึกลงฐานข้อมูลจริง?\n\n• ปิดโปรแกรม Express ก่อน\n• ระบบจะสำรองไฟล์ให้อัตโนมัติ\n• หลังบันทึกต้อง Reindex + คำนวณยอดใน Express'))return;
   busy(true,'กำลังบันทึก...');
   try{
-    const d=await (await afetch('/api/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({xls:selXls})})).json();
+    const d=await (await afetch('/api/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({xls:selXls,branch:branchVal()})})).json();
     $('#result').innerHTML='<pre>'+(d.text||d.error)+'</pre>'; $('#note').style.display='block';
   }catch(e){$('#result').innerHTML='<pre style="color:#fca5a5">'+e+'</pre>';}
   busy(false,'บันทึกเสร็จ'); loadConfig();
@@ -509,9 +522,9 @@ class H(BaseHTTPRequestHandler):
             elif u.path == "/api/listdir":
                 self._send(200, json.dumps(listdir(arg("path"), want_files=bool(arg("files"))), ensure_ascii=False))
             elif u.path == "/api/preview":
-                self._send(200, json.dumps(preview_data(arg("xls")), ensure_ascii=False))
+                self._send(200, json.dumps(preview_data(arg("xls"), arg("branch")), ensure_ascii=False))
             elif u.path == "/api/verify":
-                self._send(200, json.dumps({"text": verify_text(arg("xls"))}, ensure_ascii=False))
+                self._send(200, json.dumps({"text": verify_text(arg("xls"), arg("branch"))}, ensure_ascii=False))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception:
@@ -564,7 +577,7 @@ class H(BaseHTTPRequestHandler):
                 save_config()
                 self._send(200, json.dumps(config_status(), ensure_ascii=False))
             elif u.path == "/api/commit":
-                self._send(200, json.dumps({"text": capture(EX.cmd_preview, _args(data.get("xls")), commit=True)}, ensure_ascii=False))
+                self._send(200, json.dumps({"text": capture(EX.cmd_preview, _args(data.get("xls"), data.get("branch")), commit=True)}, ensure_ascii=False))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception:

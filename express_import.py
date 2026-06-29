@@ -44,16 +44,22 @@ PARTS_STKDES = "รายได้จากการขายอะไหล่�
 
 # ───── โหมดซื้อเงินเชื่อ-อะไหล่ (RS) ─────
 PUR_PREFIX  = "RS"         # ใบรับสินค้า/ซื้อเงินเชื่อ-อะไหล่
-PUR_DEPCOD  = "106"
 PUR_INV_ACC = "1162-01"    # เดบิต สินค้าคงเหลือ-อะไหล่
 PUR_VATIN   = "1194-01"    # เดบิต ภาษีซื้อ
-PUR_STKCOD  = "11-6200-01"
-PUR_STKDES  = "สินค้าคงเหลือ-อะไหล่และอุปกรณ์"
 PUR_PAYTRM  = 45           # เครดิต (วัน)
 PUR_JNLTYP  = "04"
 PUR_DESC    = "ซื้อเชื่อจาก"
 PUR_ACCFROM = "1133-01"    # CHGACCFROM
-PUR_SUPCOD  = "P078"       # ผู้ขายหลักของรายงานนี้ (นิสสันมอเตอร์) — กำหนดตรงกันชื่อซ้ำ
+
+# 2 สาขา: ชุมพร (เดิม) / สุราษ — ผู้ใช้เลือกโฟลเดอร์ DB ของสาขานั้นเอง
+PUR_BRANCHES = {
+    "chumphon": {"name":"ชุมพร", "supcod":"P078", "depcod":"106",
+                 "stkcod":"11-6200-01", "stkdes":"สินค้าคงเหลือ-อะไหล่และอุปกรณ์", "slash":True},
+    "surat":    {"name":"สุราษ", "supcod":"P091", "depcod":"ซ2",
+                 "stkcod":"5000", "stkdes":"อะไหล่และอุปกรณ์", "slash":False},
+}
+PUR_DEFAULT_BRANCH = "chumphon"
+def pur_cfg(branch): return PUR_BRANCHES.get(branch or PUR_DEFAULT_BRANCH, PUR_BRANCHES[PUR_DEFAULT_BRANCH])
 
 # ───── โหมดจ่ายเงินสดย่อย (DP = จ่ายคชจ.จากเงินทดรองจ่ายย่อย) ─────
 PETTY_REFNUM = ""          # ใบเบิก (VR...) เว้นว่างไว้ (ระบุภายหลังได้)
@@ -300,10 +306,9 @@ def vendor_by_code(code):
         if info["SUPCOD"] == code: return info
     return None
 
-def vendor_lookup(apname):
-    """ผู้ขายของรายงานซื้อ = P078 (กำหนดไว้) ; ถ้าหาไม่เจอค่อย match จากชื่อ
-       (เผื่อชื่อซ้ำ เลือกตัวที่เอกสาร RS ใช้บ่อยสุด / เลขภาษี 13 หลัก / active)"""
-    fixed = vendor_by_code(PUR_SUPCOD)
+def vendor_lookup(apname, supcod):
+    """ผู้ขายของรายงานซื้อ = รหัสที่กำหนดต่อสาขา ; ถ้าหาไม่เจอค่อย match จากชื่อ"""
+    fixed = vendor_by_code(supcod)
     if fixed: return fixed
     key = _norm(apname)
     cands = [info for nm, info in _load_vendors() if nm and (nm in key or key in nm)]
@@ -327,15 +332,17 @@ def read_purchase_receipts(path):
                     "NET":r2(g(r,"NETAMT")), "VAT":r2(g(r,"VATAMT")), "RECVNO":str(g(r,"RECVNO")).strip()})
     return out
 
-def group_purchase_bills(rows):
-    """แต่ละแถว = 1 บิล (ไม่รวม)"""
+def group_purchase_bills(rows, branch=None):
+    """แต่ละแถว = 1 บิล (ไม่รวม) ; cfg ตามสาขา (ชุมพร/สุราษ)"""
+    cfg = pur_cfg(branch)
     bills = []
     for v in rows:
         net, vat = v["NET"], v["VAT"]
-        ven = vendor_lookup(v["APNAME"]) or {}
-        bills.append({"mode":"purchase", "date":v["INVDATE"], "youref":v["INVNO"],
+        ven = vendor_lookup(v["APNAME"], cfg["supcod"]) or {}
+        bills.append({"mode":"purchase", "branch": branch or PUR_DEFAULT_BRANCH,
+                      "date":v["INVDATE"], "youref":v["INVNO"],
                       "invno":v["INVNO"], "apname":v["APNAME"], "vendor":ven,
-                      "lines":[{"stk":PUR_STKCOD, "acc":PUR_INV_ACC, "des":PUR_STKDES, "amt":net}],
+                      "lines":[{"stk":cfg["stkcod"], "acc":PUR_INV_ACC, "des":cfg["stkdes"], "amt":net}],
                       "sub":net, "vat":vat, "total":r2(net+vat), "njobs":1})
     return bills
 
@@ -518,11 +525,11 @@ def build_purchase_all(bill, docnum, t_aptrn, t_gljnl, t_gljit, t_isvat, t_stcrd
     """ซื้อเงินเชื่อ-อะไหล่ (RS): 1 ใบ/แถว, แยก VAT, Dr สินค้า+ภาษีซื้อ Cr เจ้าหนี้
        (ไม่แตะยอดสต็อกสะสม — ให้ Express คำนวณต้นทุน/ยอดสินค้าใหม่ภายหลัง)"""
     d, net, vat, tot = bill["date"], bill["sub"], bill["vat"], bill["total"]
-    inv = bill["invno"]; ven = bill["vendor"]
+    inv = bill["invno"]; ven = bill["vendor"]; cfg = pur_cfg(bill.get("branch"))
     supcod = ven.get("SUPCOD",""); apacc = ven.get("APACC","") or "2123-02"
     desc = f"{PUR_DESC}  " + bill["apname"].replace(" ", "\xa0")   # "ซื้อเชื่อจาก  " + ชื่อ(nbsp)
     due = d + datetime.timedelta(days=PUR_PAYTRM)
-    DEP = PUR_DEPCOD; vatprd = d.replace(day=1)
+    DEP = cfg["depcod"]; vatprd = d.replace(day=1)
 
     aptrn = t_aptrn.build_record({
         "RECTYP":"3","DOCNUM":docnum,"DOCDAT":D(d),"REFNUM":inv,"VATPRD":D(vatprd),
@@ -557,10 +564,10 @@ def build_purchase_all(bill, docnum, t_aptrn, t_gljnl, t_gljit, t_isvat, t_stcrd
 
     # STCRD: รับเข้าสต็อก (cost=net) — ยอดสะสมปล่อยให้ Express คำนวณใหม่
     stcrd = [t_stcrd.build_record({
-        "STKCOD":PUR_STKCOD,"LOCCOD":"01","DOCNUM":docnum,"SEQNUM":"  1","DOCDAT":D(d),
+        "STKCOD":cfg["stkcod"],"LOCCOD":"01","DOCNUM":docnum,"SEQNUM":"  1","DOCDAT":D(d),
         "REFNUM":inv,"DEPCOD":DEP,"POSOPR":"0","PEOPLE":supcod,"TRNQTY":1.0,"TQUCOD":"ชน",
         "TFACTOR":1.0,"UNITPR":net,"DISCAMT":0.0,"TRNVAL":net,"XTRNQTY":1.0,"XUNITPR":net,
-        "XTRNVAL":net,"NETVAL":net,"STKDES":PUR_STKDES})]
+        "XTRNVAL":net,"NETVAL":net,"STKDES":cfg["stkdes"]})]
 
     return {"APTRN":[aptrn],"GLJNL":gljnl,"GLJNLIT":git,"ISVAT":isvat,"STCRD":stcrd}
 
@@ -584,11 +591,11 @@ def build_bill(bill, docnum, t):
     fn = build_parts_all if m=="parts" else build_all
     return fn(bill, docnum, t["ARTRN"],t["GLJNL"],t["GLJNLIT"],t["ISVAT"],t["STCRD"])
 
-def load_source(xls):
-    """อ่านไฟล์ -> (mode, bills)"""
+def load_source(xls, branch=None):
+    """อ่านไฟล์ -> (mode, bills) ; branch ใช้เฉพาะโหมดซื้อ (ชุมพร/สุราษ)"""
     mode = detect_mode(xls)
     if mode=="petty":    return mode, group_petty_bills(read_petty(xls))
-    if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls))
+    if mode=="purchase": return mode, group_purchase_bills(read_purchase_receipts(xls), branch)
     if mode=="parts":    return mode, group_parts_bills(read_parts_invoices(xls))
     return mode, group_bills(read_xls_jobs(xls))
 
@@ -597,23 +604,30 @@ def prefix_for(bills):
     m = bills[0].get("mode") if bills else None
     return {"parts":PARTS_PREFIX, "purchase":PUR_PREFIX}.get(m, DOC_PREFIX)
 
-def next_numbers(t_hdr, bills, prefix=None, dedup_field="YOUREF"):
-    """กำหนดเลขที่บิลต่อจากที่มีอยู่ในตารางหัว (ARTRN/APTRN) ต่อ ปีเดือน"""
+def next_numbers(t_hdr, bills, prefix=None, dedup_field="YOUREF", slash=True):
+    """กำหนดเลขที่บิลต่อจากที่มีอยู่ในตารางหัว (ARTRN/APTRN) ต่อ ปีเดือน
+       slash=True -> RS6905/088 ; slash=False -> RS6906014 (ไม่มี /)"""
     prefix = prefix or prefix_for(bills)
     used = {}; existing = set()
     for i in range(len(t_hdr)):
         dn = t_hdr.get(i).get("DOCNUM") or ""
-        if dn.startswith(prefix) and "/" in dn:
-            ym, _, nn = dn[len(prefix):].partition("/")
-            if nn.isdigit(): used[ym] = max(used.get(ym,0), int(nn))
+        if not dn.startswith(prefix): continue
+        body = dn[len(prefix):]
+        if slash:
+            ym, _, nn = body.partition("/")
+        else:
+            ym, nn = body[:4], body[4:]            # RS|6906|014
+        if ym.isdigit() and nn.isdigit():
+            used[ym] = max(used.get(ym,0), int(nn))
             existing.add(t_hdr.get(i).get(dedup_field))
+    sep = "/" if slash else ""
     out = []
     for b in bills:
         if b["youref"] in existing:
             out.append((b, None)); continue          # มีแล้ว -> ข้าม
         ym = yymm(b["date"])
         used[ym] = used.get(ym, 0) + 1
-        out.append((b, f"{prefix}{ym}/{used[ym]:03d}"))
+        out.append((b, f"{prefix}{ym}{sep}{used[ym]:03d}"))
     return out
 
 # ───────────────────────── commands ─────────────────────────
@@ -634,22 +648,24 @@ def pick_xls(arg):
     if not xs: sys.exit("ไม่พบไฟล์ .xls ที่มีข้อมูลใน " + XLS_DIR)
     return sorted(xs)[0]
 
-def plan_docnums(mode, t, bills):
+def plan_docnums(mode, t, bills, branch=None):
     """คืน [(bill, docnum|None)] — petty ใช้เลขจากไฟล์, อื่นๆ รันต่อจากตารางหัว"""
     if mode == "petty":
         have = {t["GLPTT"].get(i).get("DOCNUM") for i in range(len(t["GLPTT"]))}
         return [(b, None if b["docnum"] in have else b["docnum"]) for b in bills]
-    hdr   = "APTRN" if mode == "purchase" else "ARTRN"
-    dedup = "REFNUM" if mode == "purchase" else "YOUREF"
-    return next_numbers(t[hdr], bills, dedup_field=dedup)
+    if mode == "purchase":
+        return next_numbers(t["APTRN"], bills, prefix=PUR_PREFIX, dedup_field="REFNUM",
+                            slash=pur_cfg(branch)["slash"])
+    return next_numbers(t["ARTRN"], bills, dedup_field="YOUREF")
 
 def cmd_preview(args, commit=False):
     xls = pick_xls(args.xls)
-    mode, bills = load_source(xls)
+    branch = getattr(args, "branch", None)
+    mode, bills = load_source(xls, branch)
     unit = {"parts":"ใบกำกับ","purchase":"ใบรับ","petty":"รายการ"}.get(mode,"งาน")
     nitems = sum(b["njobs"] for b in bills)
     t = open_tables()
-    plan = plan_docnums(mode, t, bills)
+    plan = plan_docnums(mode, t, bills, branch)
 
     print(f"ไฟล์ต้นทาง : {os.path.basename(xls)}  [โหมด {mode}]  ({nitems} {unit} -> {len(bills)} บิล)")
     print("="*64)
