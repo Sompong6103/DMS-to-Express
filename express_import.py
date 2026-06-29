@@ -637,7 +637,7 @@ def build_purchase_all(bill, docnum, t_aptrn, t_gljnl, t_gljit, t_isvat, t_stcrd
         "DEPCOD":DEP,"FLGVAT":"2","SUPCOD":supcod,"PAYTRM":PUR_PAYTRM,"DUEDAT":D(due),
         "BILNUM":"~","NXTSEQ":"  1","AMOUNT":net,"DISCAMT":0.0,"AFTDISC":net,"ADVAMT":0.0,
         "TOTAL":net,"AMTRAT0":0.0,"VATRAT":VAT_RATE,"VATAMT":vat,"NETAMT":tot,"NETVAL":net,
-        "PAYAMT":tot,"REMAMT":0.0,"CMPLAPP":"Y","DOCSTAT":"N","CSHPAY":0.0,"CHQPAY":0.0,
+        "PAYAMT":0.0,"REMAMT":tot,"CMPLAPP":"N","DOCSTAT":"N","CSHPAY":0.0,"CHQPAY":0.0,
         "VATDAT":D(d),"SRV_VATTYP":"1","PVATPRORAT":"-","USERID":USER_ID,"CHGDAT":D(TODAY),
         "ORGNUM":ven.get("ORGNUM",0)})
 
